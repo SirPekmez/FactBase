@@ -1,6 +1,5 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const authRouter = require("../dist/routes/auth").default;
 
 test("compiled Express app can be imported without starting a listener", () => {
   const express = require("express");
@@ -43,20 +42,26 @@ test("compiled process bootstrap starts the existing app listener", () => {
   }
 });
 
-test("compiled auth router exposes the existing POST /logout baseline", () => {
-  const logoutRoute = authRouter.stack.find(
-    (layer) => layer.route?.path === "/logout",
-  );
-
-  assert.ok(logoutRoute, "expected the existing /logout route");
-  assert.equal(logoutRoute.route.methods.post, true);
-
-  const logoutHandler = logoutRoute.route.stack.find(
-    (layer) => layer.method === "post",
-  ).handle;
+test("compiled Express app exposes the existing POST /api/auth/logout baseline", () => {
+  const app = require("../dist/app").default;
+  const headers = {};
+  const request = {
+    method: "POST",
+    url: "/api/auth/logout",
+    headers: {},
+  };
   const response = {
     statusCode: undefined,
     body: undefined,
+    setHeader(name, value) {
+      headers[name.toLowerCase()] = value;
+    },
+    getHeader(name) {
+      return headers[name.toLowerCase()];
+    },
+    removeHeader(name) {
+      delete headers[name.toLowerCase()];
+    },
     status(statusCode) {
       this.statusCode = statusCode;
       return this;
@@ -66,10 +71,13 @@ test("compiled auth router exposes the existing POST /logout baseline", () => {
       return this;
     },
   };
+  let dispatchError;
 
-  const result = logoutHandler({}, response);
+  app.handle(request, response, (error) => {
+    dispatchError = error ?? new Error("request was not handled");
+  });
 
-  assert.equal(result, response);
+  assert.equal(dispatchError, undefined);
   assert.equal(response.statusCode, 200);
   assert.deepEqual(response.body, { message: "Logout erfolgreich" });
 });
