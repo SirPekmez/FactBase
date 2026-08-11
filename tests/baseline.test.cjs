@@ -24,6 +24,8 @@ test("compiled Express app can be imported without starting a listener", () => {
 test("compiled process bootstrap starts the existing app listener", () => {
   const app = require("../dist/app").default;
   const originalListen = app.listen;
+  const originalPort = process.env.PORT;
+  const serverPath = require.resolve("../dist/server");
   const listenCalls = [];
 
   app.listen = (...args) => {
@@ -31,14 +33,28 @@ test("compiled process bootstrap starts the existing app listener", () => {
   };
 
   try {
-    delete require.cache[require.resolve("../dist/server")];
-    require("../dist/server");
+    delete process.env.PORT;
+    delete require.cache[serverPath];
+    require(serverPath);
 
-    assert.equal(listenCalls.length, 1);
+    process.env.PORT = "4317";
+    delete require.cache[serverPath];
+    require(serverPath);
+
+    assert.equal(listenCalls.length, 2);
     assert.equal(listenCalls[0][0], 3000);
     assert.equal(typeof listenCalls[0][1], "function");
+    assert.equal(listenCalls[1][0], 4317);
+    assert.equal(typeof listenCalls[1][1], "function");
   } finally {
+    delete require.cache[serverPath];
     app.listen = originalListen;
+
+    if (originalPort === undefined) {
+      delete process.env.PORT;
+    } else {
+      process.env.PORT = originalPort;
+    }
   }
 });
 
