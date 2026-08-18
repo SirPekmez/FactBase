@@ -8,7 +8,7 @@
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "npm run clean && tsc",
     "start": "node dist/server.js",
-    "test": "npm run build && node --test tests/baseline.test.cjs"
+    "test": "npm run build && node --test tests/*.test.cjs"
   },
   "repository": {
     "type": "git",
@@ -23,11 +23,13 @@
   },
   "homepage": "https://github.com/SirPekmez/FactBase#readme",
   "dependencies": {
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "pg": "^8.23.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/node": "^25.9.5",
+    "@types/pg": "^8.23.1",
     "tsx": "^4.23.11",
     "typescript": "^7.0.2"
   }
