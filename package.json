@@ -8,7 +8,9 @@
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "npm run clean && tsc",
     "start": "node dist/server.js",
-    "test": "npm run build && node --test tests/*.test.cjs"
+    "test": "npm run build && node --test tests/*.test.cjs",
+    "test:integration": "npm run build && node --test tests/*.integration.cjs",
+    "test:all": "npm test && npm run test:integration"
   },
   "repository": {
     "type": "git",

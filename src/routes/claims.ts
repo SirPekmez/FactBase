@@ -1,12 +1,15 @@
 import { RequestHandler, Router } from "express";
 import { createClaimController } from "../controllers/claimController";
+import { createClaimVersionController } from "../controllers/claimVersionController";
 
 export function buildClaimsRouter(
-  handler: RequestHandler = createClaimController,
+  createHandler: RequestHandler = createClaimController,
+  createVersionHandler: RequestHandler = createClaimVersionController,
 ) {
   const router = Router();
 
-  router.post("/", handler);
+  router.post("/", createHandler);
+  router.post("/:claimId/versions", createVersionHandler);
 
   return router;
 }
