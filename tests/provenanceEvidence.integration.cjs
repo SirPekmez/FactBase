@@ -231,7 +231,9 @@ test("provenance, evidence, assessments and diff remain explicit and reproducibl
         independence: 1,
         assessmentMethod: "manual",
         rationale: "Exact integration rationale: source is direct and independently documented.",
-        assessedBy: "integration-reviewer",
+        operationContext: {
+          initiator: { type: "human", id: "integration-reviewer" },
+        },
       },
       pool,
     );
@@ -249,6 +251,11 @@ test("provenance, evidence, assessments and diff remain explicit and reproducibl
     );
     assert.equal(assessedEvidence.relation, "contradicts");
     assert.equal(assessedEvidence.assessments[0].sourceQuality, 0.9);
+    assert.deepEqual(assessedEvidence.assessments[0].initiator, {
+      type: "human",
+      id: "integration-reviewer",
+    });
+    assert.equal(assessedEvidence.assessments[0].legacyAssessedBy, null);
     assert.equal(
       assessedEvidence.assessments[0].rationale,
       "Exact integration rationale: source is direct and independently documented.",

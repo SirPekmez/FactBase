@@ -49,6 +49,10 @@ interface AssessmentRow extends QueryResultRow {
   assessment_method: string | null;
   rationale: string | null;
   assessed_by: string | null;
+  initiator_type: string | null;
+  initiator_id: string | null;
+  responds_to_assessment_id: string | null;
+  response_relation: string | null;
   assessed_at: Date;
 }
 
@@ -124,6 +128,10 @@ async function loadClaimVersion(
       ea.assessment_method,
       ea.rationale,
       ea.assessed_by,
+      ea.initiator_type,
+      ea.initiator_id,
+      ea.responds_to_assessment_id,
+      ea.response_relation,
       ea.assessed_at
     FROM public.evidence_assessments ea
     INNER JOIN public.claim_version_evidence cve
@@ -188,7 +196,21 @@ async function loadClaimVersion(
           independence: optionalNumber(assessment.independence),
           assessmentMethod: assessment.assessment_method,
           rationale: assessment.rationale,
-          assessedBy: assessment.assessed_by,
+          initiator:
+            assessment.initiator_type === null
+              ? null
+              : {
+                  type: assessment.initiator_type,
+                  id: assessment.initiator_id,
+                },
+          responseTo:
+            assessment.responds_to_assessment_id === null
+              ? null
+              : {
+                  assessmentId: assessment.responds_to_assessment_id,
+                  relation: assessment.response_relation,
+                },
+          legacyAssessedBy: assessment.assessed_by,
           assessedAt: assessment.assessed_at,
         }),
       ),

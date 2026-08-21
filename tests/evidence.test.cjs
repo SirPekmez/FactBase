@@ -7,6 +7,7 @@ const versionTwoId = "33333333-3333-4333-8333-333333333333";
 const evidenceOneId = "44444444-4444-4444-8444-444444444444";
 const evidenceTwoId = "55555555-5555-4555-8555-555555555555";
 const evidenceThreeId = "66666666-6666-4666-8666-666666666666";
+const assessmentOneId = "77777777-7777-4777-8777-777777777777";
 
 function response() {
   return {
@@ -46,7 +47,6 @@ function assessmentBody(overrides = {}) {
     independence: 1,
     assessmentMethod: "manual",
     rationale: "Exact rationale, including punctuation.",
-    assessedBy: "reviewer-17",
     ...overrides,
   };
 }
@@ -220,7 +220,7 @@ test("evidence controller maps absent claims and mismatched versions to 404", as
   assert.deepEqual(res.body, { error: "Claim version not found" });
 });
 
-test("assessment validation rejects out-of-range and non-finite values", async (t) => {
+test("assessment validation enforces dimensions, method, rationale and response pairs", async (t) => {
   const {
     buildCreateEvidenceAssessmentController,
   } = require("../dist/controllers/evidenceController");
@@ -229,6 +229,25 @@ test("assessment validation rejects out-of-range and non-finite values", async (
     assessmentBody({ relevance: 1.01 }),
     assessmentBody({ directness: Number.NaN }),
     assessmentBody({ recency: Number.POSITIVE_INFINITY }),
+    assessmentBody({ independence: Number.NEGATIVE_INFINITY }),
+    assessmentBody({ assessmentMethod: "automatic" }),
+    assessmentBody({ rationale: "" }),
+    assessmentBody({ rationale: " \n\t " }),
+    assessmentBody({ rationale: "x".repeat(4001) }),
+    assessmentBody({ respondsToAssessmentId: assessmentOneId }),
+    assessmentBody({ responseRelation: "disputes" }),
+    assessmentBody({
+      respondsToAssessmentId: assessmentOneId,
+      responseRelation: "supersedes",
+    }),
+    assessmentBody({ initiatorType: "human" }),
+    assessmentBody({ initiatorId: "client-controlled" }),
+    assessmentBody({ assessedBy: "legacy-client-value" }),
+    assessmentBody({ assessedAt: "2026-08-21T09:00:00.000Z" }),
+    {
+      assessmentMethod: "manual",
+      rationale: "No dimension was assessed.",
+    },
     assessmentBody({ unexpected: true }),
     {},
   ];
@@ -249,6 +268,38 @@ test("assessment validation rejects out-of-range and non-finite values", async (
       );
       assert.equal(res.statusCode, 400);
       assert.equal(called, false);
+    });
+  }
+});
+
+test("assessment validation accepts boundary values, methods and response relations", async (t) => {
+  const {
+    buildCreateEvidenceAssessmentController,
+  } = require("../dist/controllers/evidenceController");
+  const cases = [
+    assessmentBody({ sourceQuality: 0, relevance: undefined }),
+    assessmentBody({ sourceQuality: 1 }),
+    assessmentBody({ assessmentMethod: "rules_based" }),
+    assessmentBody({ assessmentMethod: "model_assisted" }),
+    assessmentBody({ assessmentMethod: "imported" }),
+    ...["supports", "disputes", "contextualizes"].map((responseRelation) =>
+      assessmentBody({
+        respondsToAssessmentId: assessmentOneId,
+        responseRelation,
+      }),
+    ),
+    assessmentBody({ rationale: "x".repeat(4000) }),
+  ];
+
+  for (const body of cases) {
+    await t.test(body.assessmentMethod + (body.responseRelation ?? ""), async () => {
+      const handler = buildCreateEvidenceAssessmentController(async () => ({ ok: true }));
+      const res = response();
+      await handler(
+        { params: { claimId, versionId: versionOneId, evidenceId: evidenceOneId }, body },
+        res,
+      );
+      assert.equal(res.statusCode, 201);
     });
   }
 });
@@ -275,6 +326,7 @@ test("assessment controller preserves rationale exactly and maps missing relatio
   );
   assert.equal(successResponse.statusCode, 201);
   assert.equal(received.rationale, "Exact rationale, including punctuation.");
+  assert.equal(received.operationContext, undefined);
 
   const missing = buildCreateEvidenceAssessmentController(async () => {
     throw new EvidenceRelationNotFoundError(versionOneId, evidenceOneId);
@@ -290,8 +342,122 @@ test("assessment controller preserves rationale exactly and maps missing relatio
   assert.equal(missingResponse.statusCode, 404);
 });
 
+test("assessment controller only accepts initiator identity from trusted response locals", async () => {
+  const {
+    buildCreateEvidenceAssessmentController,
+  } = require("../dist/controllers/evidenceController");
+  let received;
+  const handler = buildCreateEvidenceAssessmentController(async (input) => {
+    received = input;
+    return { assessment: { initiator: input.operationContext?.initiator ?? null } };
+  });
+  const res = { ...response(), locals: {
+    operationContext: { initiator: { type: "human", id: "verified-user-17" } },
+  } };
+
+  await handler(
+    {
+      params: { claimId, versionId: versionOneId, evidenceId: evidenceOneId },
+      body: assessmentBody(),
+    },
+    res,
+  );
+
+  assert.equal(res.statusCode, 201);
+  assert.deepEqual(received.operationContext, {
+    initiator: { type: "human", id: "verified-user-17" },
+  });
+});
+
+test("mounted assessment route rejects client-controlled identity and timestamps", async () => {
+  const { buildApp } = require("../dist/app");
+  const { buildClaimsRouter } = require("../dist/routes/claims");
+  const {
+    buildCreateEvidenceAssessmentController,
+  } = require("../dist/controllers/evidenceController");
+  let called = false;
+  const handler = buildCreateEvidenceAssessmentController(async () => {
+    called = true;
+  });
+  const app = buildApp(buildClaimsRouter(undefined, undefined, undefined, handler));
+  const forbidden = [
+    { initiatorType: "human" },
+    { initiatorId: "client-id" },
+    { assessedBy: "legacy-label" },
+    { assessedAt: "2026-08-21T09:00:00.000Z" },
+    { id: assessmentOneId },
+  ];
+
+  for (const extra of forbidden) {
+    const res = await dispatch(
+      app,
+      "POST",
+      `/api/claims/${claimId}/versions/${versionOneId}/evidence/${evidenceOneId}/assessment`,
+      assessmentBody(extra),
+    );
+    assert.equal(res.statusCode, 400);
+  }
+  assert.equal(called, false);
+});
+
+test("assessment controller maps an absent or cross-relation response target to 404", async () => {
+  const {
+    buildCreateEvidenceAssessmentController,
+  } = require("../dist/controllers/evidenceController");
+  const {
+    AssessmentResponseTargetNotFoundError,
+  } = require("../dist/services/evidenceService");
+  const handler = buildCreateEvidenceAssessmentController(async () => {
+    throw new AssessmentResponseTargetNotFoundError(assessmentOneId, evidenceOneId);
+  });
+  const res = response();
+  await handler(
+    {
+      params: { claimId, versionId: versionOneId, evidenceId: evidenceOneId },
+      body: assessmentBody({
+        respondsToAssessmentId: assessmentOneId,
+        responseRelation: "disputes",
+      }),
+    },
+    res,
+  );
+  assert.equal(res.statusCode, 404);
+  assert.deepEqual(res.body, { error: "Assessment response target not found" });
+});
+
+test("assessment controller maps a cyclic parent chain to 409", async () => {
+  const {
+    buildCreateEvidenceAssessmentController,
+  } = require("../dist/controllers/evidenceController");
+  const {
+    AssessmentGraphConflictError,
+  } = require("../dist/services/evidenceService");
+  const handler = buildCreateEvidenceAssessmentController(async () => {
+    throw new AssessmentGraphConflictError("existing_cycle");
+  });
+  const res = response();
+  await handler(
+    {
+      params: { claimId, versionId: versionOneId, evidenceId: evidenceOneId },
+      body: assessmentBody({
+        respondsToAssessmentId: assessmentOneId,
+        responseRelation: "disputes",
+      }),
+    },
+    res,
+  );
+  assert.equal(res.statusCode, 409);
+  assert.deepEqual(res.body, {
+    error: "Assessment response graph conflict",
+    reason: "existing_cycle",
+  });
+});
+
 function writeStage(sql) {
   if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) return sql;
+  if (sql === "SET TRANSACTION ISOLATION LEVEL READ COMMITTED") {
+    return "SET READ COMMITTED";
+  }
   if (sql.includes("SELECT id") && sql.includes("FROM public.claim_versions")) {
     return "VERIFY VERSION";
   }
@@ -299,14 +465,27 @@ function writeStage(sql) {
   if (sql.includes("INSERT INTO public.claim_version_evidence")) {
     return "INSERT RELATION";
   }
-  if (sql.includes("SELECT cve.id")) return "VERIFY RELATION";
+  if (sql.includes("SELECT cve.id") && sql.includes("FOR UPDATE OF cve")) {
+    return "LOCK RELATION";
+  }
+  if (sql.includes("WITH RECURSIVE ancestry")) return "CHECK RESPONSE CHAIN";
+  if (sql.includes("FROM public.evidence_assessments") && sql.includes("WHERE id")) {
+    return "VERIFY RESPONSE TARGET";
+  }
   if (sql.includes("INSERT INTO public.evidence_assessments")) {
     return "INSERT ASSESSMENT";
   }
   throw new Error(`Unexpected write query: ${sql}`);
 }
 
-function writeHarness({ failures = {}, versionExists = true, relationExists = true } = {}) {
+function writeHarness({
+  failures = {},
+  emptyRows = [],
+  versionExists = true,
+  relationExists = true,
+  responseTargetExists = true,
+  chainRows,
+} = {}) {
   const calls = [];
   const releases = [];
   const now = new Date("2026-08-21T09:00:00.000Z");
@@ -316,6 +495,9 @@ function writeHarness({ failures = {}, versionExists = true, relationExists = tr
       calls.push({ stage, sql, values });
       if (Object.prototype.hasOwnProperty.call(failures, stage)) {
         throw failures[stage];
+      }
+      if (emptyRows.includes(stage)) {
+        return { rows: [] };
       }
       if (stage === "VERIFY VERSION") {
         return { rows: versionExists ? [{ id: versionOneId }] : [] };
@@ -332,15 +514,28 @@ function writeHarness({ failures = {}, versionExists = true, relationExists = tr
       if (stage === "INSERT RELATION") {
         return { rows: [{ id: values[0], claim_version_id: values[1], evidence_id: values[2], relation: values[3], created_at: now }] };
       }
-      if (stage === "VERIFY RELATION") {
-        return { rows: relationExists ? [{ id: "77777777-7777-4777-8777-777777777777" }] : [] };
+      if (stage === "LOCK RELATION") {
+        return { rows: relationExists ? [{ id: assessmentOneId }] : [] };
+      }
+      if (stage === "VERIFY RESPONSE TARGET") {
+        return { rows: responseTargetExists ? [{ id: values[0] }] : [] };
+      }
+      if (stage === "CHECK RESPONSE CHAIN") {
+        return { rows: chainRows ?? [{
+          id: assessmentOneId,
+          claim_version_evidence_id: assessmentOneId,
+          responds_to_assessment_id: null,
+        }] };
       }
       if (stage === "INSERT ASSESSMENT") {
         return { rows: [{
           id: values[0], claim_version_evidence_id: values[1],
           source_quality: values[2], relevance: values[3], directness: values[4],
           recency: values[5], independence: values[6], assessment_method: values[7],
-          rationale: values[8], assessed_by: values[9], assessed_at: now,
+          rationale: values[8], assessed_by: null,
+          initiator_type: values[9], initiator_id: values[10],
+          responds_to_assessment_id: values[11], response_relation: values[12],
+          assessed_at: now,
         }] };
       }
       return { rows: [] };
@@ -420,11 +615,256 @@ test("assessment is append-inserted with exact dimensions and rationale", async 
   };
   const result = await createEvidenceAssessment(input, harness.pool);
   assert.deepEqual(harness.calls.map((call) => call.stage), [
-    "BEGIN", "VERIFY RELATION", "INSERT ASSESSMENT", "COMMIT",
+    "BEGIN", "SET READ COMMITTED", "LOCK RELATION", "INSERT ASSESSMENT", "COMMIT",
   ]);
   assert.deepEqual(harness.releases, [[]]);
   assert.equal(result.assessment.sourceQuality, 0.9);
   assert.equal(result.assessment.rationale, input.rationale);
+  assert.equal(result.assessment.initiator, null);
+  assert.equal(result.assessment.legacyAssessedBy, null);
+});
+
+test("assessment response is inserted against the verified same evidence relation", async () => {
+  const { createEvidenceAssessment } = require("../dist/services/evidenceService");
+  const harness = writeHarness();
+  const result = await createEvidenceAssessment(
+    {
+      claimId, versionId: versionOneId, evidenceId: evidenceOneId,
+      ...assessmentBody({
+        respondsToAssessmentId: assessmentOneId,
+        responseRelation: "disputes",
+      }),
+      operationContext: {
+        initiator: { type: "agent", id: "assessment-agent" },
+      },
+    },
+    harness.pool,
+  );
+  assert.deepEqual(harness.calls.map((call) => call.stage), [
+    "BEGIN", "SET READ COMMITTED", "LOCK RELATION", "VERIFY RESPONSE TARGET", "CHECK RESPONSE CHAIN",
+    "INSERT ASSESSMENT", "COMMIT",
+  ]);
+  assert.deepEqual(result.assessment.initiator, {
+    type: "agent", id: "assessment-agent",
+  });
+  assert.deepEqual(result.assessment.responseTo, {
+    assessmentId: assessmentOneId, relation: "disputes",
+  });
+});
+
+test("assessment response to another relation returns the dedicated not-found error and rolls back", async () => {
+  const {
+    AssessmentResponseTargetNotFoundError,
+    createEvidenceAssessment,
+  } = require("../dist/services/evidenceService");
+  const harness = writeHarness({ responseTargetExists: false });
+  await assert.rejects(
+    createEvidenceAssessment(
+      {
+        claimId, versionId: versionOneId, evidenceId: evidenceOneId,
+        ...assessmentBody({
+          respondsToAssessmentId: assessmentOneId,
+          responseRelation: "supports",
+        }),
+      },
+      harness.pool,
+    ),
+    AssessmentResponseTargetNotFoundError,
+  );
+  assert.deepEqual(harness.calls.map((call) => call.stage), [
+    "BEGIN", "SET READ COMMITTED", "LOCK RELATION", "VERIFY RESPONSE TARGET", "ROLLBACK",
+  ]);
+  assert.deepEqual(harness.releases, [[]]);
+});
+
+test("assessment insert failures roll back and a failed rollback destroys the client", async () => {
+  const { createEvidenceAssessment } = require("../dist/services/evidenceService");
+  const insertError = new Error("assessment insert failed");
+  const rollbackError = new Error("assessment rollback failed");
+
+  const normal = writeHarness({ failures: { "INSERT ASSESSMENT": insertError } });
+  await assert.rejects(
+    createEvidenceAssessment(
+      { claimId, versionId: versionOneId, evidenceId: evidenceOneId, ...assessmentBody() },
+      normal.pool,
+    ),
+    insertError,
+  );
+  assert.deepEqual(normal.calls.map((call) => call.stage), [
+    "BEGIN", "SET READ COMMITTED", "LOCK RELATION", "INSERT ASSESSMENT", "ROLLBACK",
+  ]);
+  assert.deepEqual(normal.releases, [[]]);
+
+  const broken = writeHarness({
+    failures: { "INSERT ASSESSMENT": insertError, ROLLBACK: rollbackError },
+  });
+  await assert.rejects(
+    createEvidenceAssessment(
+      { claimId, versionId: versionOneId, evidenceId: evidenceOneId, ...assessmentBody() },
+      broken.pool,
+    ),
+    (error) => {
+      assert.equal(error.originalError, insertError);
+      assert.equal(error.rollbackError, rollbackError);
+      return true;
+    },
+  );
+  assert.deepEqual(broken.releases, [[true]]);
+});
+
+test("assessment transaction handles begin, verification, empty returning and commit failures", async (t) => {
+  const { createEvidenceAssessment } = require("../dist/services/evidenceService");
+  const input = {
+    claimId, versionId: versionOneId, evidenceId: evidenceOneId, ...assessmentBody(),
+  };
+  const cases = [
+    {
+      name: "BEGIN failure does not roll back",
+      harness: writeHarness({ failures: { BEGIN: new Error("begin failed") } }),
+      expected: ["BEGIN"],
+    },
+    {
+      name: "isolation setup failure rolls back",
+      harness: writeHarness({ failures: { "SET READ COMMITTED": new Error("isolation failed") } }),
+      expected: ["BEGIN", "SET READ COMMITTED", "ROLLBACK"],
+    },
+    {
+      name: "relation verification failure rolls back",
+      harness: writeHarness({ failures: { "LOCK RELATION": new Error("verify failed") } }),
+      expected: ["BEGIN", "SET READ COMMITTED", "LOCK RELATION", "ROLLBACK"],
+    },
+    {
+      name: "response verification failure rolls back",
+      harness: writeHarness({ failures: { "VERIFY RESPONSE TARGET": new Error("response verify failed") } }),
+      input: {
+        ...input,
+        respondsToAssessmentId: assessmentOneId,
+        responseRelation: "supports",
+      },
+      expected: ["BEGIN", "SET READ COMMITTED", "LOCK RELATION", "VERIFY RESPONSE TARGET", "ROLLBACK"],
+    },
+    {
+      name: "parent-chain inspection failure rolls back",
+      harness: writeHarness({ failures: { "CHECK RESPONSE CHAIN": new Error("chain failed") } }),
+      input: {
+        ...input,
+        respondsToAssessmentId: assessmentOneId,
+        responseRelation: "supports",
+      },
+      expected: [
+        "BEGIN", "SET READ COMMITTED", "LOCK RELATION",
+        "VERIFY RESPONSE TARGET", "CHECK RESPONSE CHAIN", "ROLLBACK",
+      ],
+    },
+    {
+      name: "empty returning rolls back",
+      harness: writeHarness({ emptyRows: ["INSERT ASSESSMENT"] }),
+      expected: ["BEGIN", "SET READ COMMITTED", "LOCK RELATION", "INSERT ASSESSMENT", "ROLLBACK"],
+    },
+    {
+      name: "commit failure rolls back",
+      harness: writeHarness({ failures: { COMMIT: new Error("commit failed") } }),
+      expected: ["BEGIN", "SET READ COMMITTED", "LOCK RELATION", "INSERT ASSESSMENT", "COMMIT", "ROLLBACK"],
+    },
+  ];
+
+  for (const item of cases) {
+    await t.test(item.name, async () => {
+      await assert.rejects(createEvidenceAssessment(item.input ?? input, item.harness.pool));
+      assert.deepEqual(item.harness.calls.map((call) => call.stage), item.expected);
+      assert.deepEqual(item.harness.releases, [[]]);
+    });
+  }
+});
+
+test("assessment service rejects damaged parent chains before insert", async (t) => {
+  const {
+    AssessmentGraphConflictError,
+    createEvidenceAssessment,
+  } = require("../dist/services/evidenceService");
+  const secondAssessmentId = "88888888-8888-4888-8888-888888888888";
+  const thirdAssessmentId = "99999999-9999-4999-8999-999999999999";
+  const otherRelationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const missingAssessmentId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const row = (id, parent, relationId = assessmentOneId) => ({
+    id,
+    claim_version_evidence_id: relationId,
+    responds_to_assessment_id: parent,
+  });
+  const cases = [
+    ["self cycle", [row(assessmentOneId, assessmentOneId)], "existing_cycle"],
+    ["two-node cycle", [
+      row(assessmentOneId, secondAssessmentId),
+      row(secondAssessmentId, assessmentOneId),
+    ], "existing_cycle"],
+    ["multi-node cycle", [
+      row(assessmentOneId, secondAssessmentId),
+      row(secondAssessmentId, thirdAssessmentId),
+      row(thirdAssessmentId, assessmentOneId),
+    ], "existing_cycle"],
+    ["cross-relation ancestor", [
+      row(assessmentOneId, secondAssessmentId),
+      row(secondAssessmentId, null, otherRelationId),
+    ], "cross_relation_ancestor"],
+    ["missing ancestor", [
+      row(assessmentOneId, missingAssessmentId),
+    ], "missing_ancestor"],
+  ];
+
+  for (const [name, chainRows, reason] of cases) {
+    await t.test(name, async () => {
+      const harness = writeHarness({ chainRows });
+      await assert.rejects(
+        createEvidenceAssessment(
+          {
+            claimId, versionId: versionOneId, evidenceId: evidenceOneId,
+            ...assessmentBody({
+              respondsToAssessmentId: assessmentOneId,
+              responseRelation: "disputes",
+            }),
+          },
+          harness.pool,
+        ),
+        (error) => error instanceof AssessmentGraphConflictError && error.reason === reason,
+      );
+      assert.deepEqual(harness.calls.map((call) => call.stage), [
+        "BEGIN", "SET READ COMMITTED", "LOCK RELATION", "VERIFY RESPONSE TARGET",
+        "CHECK RESPONSE CHAIN", "ROLLBACK",
+      ]);
+      assert.equal(
+        harness.calls.some((call) => call.stage === "INSERT ASSESSMENT"),
+        false,
+      );
+    });
+  }
+});
+
+test("parent-chain inspection detects a defensive path back to the new id", () => {
+  const {
+    inspectAssessmentParentChain,
+  } = require("../dist/services/evidenceService");
+  const newAssessmentId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const rows = [
+    {
+      id: assessmentOneId,
+      claim_version_evidence_id: assessmentOneId,
+      responds_to_assessment_id: newAssessmentId,
+    },
+    {
+      id: newAssessmentId,
+      claim_version_evidence_id: assessmentOneId,
+      responds_to_assessment_id: null,
+    },
+  ];
+  assert.equal(
+    inspectAssessmentParentChain(
+      rows,
+      assessmentOneId,
+      newAssessmentId,
+      assessmentOneId,
+    ),
+    "would_create_cycle",
+  );
 });
 
 function versionRow(id, overrides = {}) {
@@ -478,14 +918,19 @@ function readHarness() {
       relation_id: "a1111111-1111-4111-8111-111111111111",
       source_quality: "0.9", relevance: "1", directness: "0.8", recency: "0.7",
       independence: "1", assessment_method: "manual", rationale: "Original",
-      assessed_by: "reviewer", assessed_at: new Date("2026-08-21T06:03:00.000Z"),
+      assessed_by: "legacy-reviewer", initiator_type: null, initiator_id: null,
+      responds_to_assessment_id: null, response_relation: null,
+      assessed_at: new Date("2026-08-21T06:03:00.000Z"),
     }]],
     [versionTwoId, [{
       id: "b2222222-2222-4222-8222-222222222222",
       relation_id: "a3333333-3333-4333-8333-333333333333",
       source_quality: "0.5", relevance: "1", directness: "0.6", recency: "0.7",
       independence: "1", assessment_method: "manual", rationale: "Reassessed",
-      assessed_by: "reviewer", assessed_at: new Date("2026-08-21T06:04:00.000Z"),
+      assessed_by: null, initiator_type: "human", initiator_id: "verified-reviewer",
+      responds_to_assessment_id: "b1111111-1111-4111-8111-111111111111",
+      response_relation: "disputes",
+      assessed_at: new Date("2026-08-21T06:04:00.000Z"),
     }]],
   ]);
   let activeVersionId;
@@ -521,6 +966,19 @@ test("read model joins explicit provenance, evidence and assessments", async () 
   assert.equal(result.evidence[0].relation, "contradicts");
   assert.equal(result.evidence[0].assessments[0].sourceQuality, 0.5);
   assert.equal(result.evidence[0].assessments[0].rationale, "Reassessed");
+  assert.deepEqual(result.evidence[0].assessments[0].initiator, {
+    type: "human", id: "verified-reviewer",
+  });
+  assert.deepEqual(result.evidence[0].assessments[0].responseTo, {
+    assessmentId: "b1111111-1111-4111-8111-111111111111",
+    relation: "disputes",
+  });
+  const legacy = await getClaimVersionDetails(claimId, versionOneId, readHarness().pool);
+  assert.equal(
+    legacy.evidence[0].assessments[0].legacyAssessedBy,
+    "legacy-reviewer",
+  );
+  assert.equal(legacy.evidence[0].assessments[0].initiator, null);
   assert.deepEqual(harness.releases, [[]]);
 });
 

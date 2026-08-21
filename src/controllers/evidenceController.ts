@@ -1,5 +1,9 @@
 import { Request, Response } from "express";
 import {
+  ASSESSMENT_METHODS,
+  ASSESSMENT_RESPONSE_RELATIONS,
+  AssessmentGraphConflictError,
+  AssessmentResponseTargetNotFoundError,
   ClaimVersionNotFoundError,
   CreateEvidenceAssessmentInput,
   CreateEvidenceInput,
@@ -8,6 +12,11 @@ import {
   createEvidenceAssessment,
   createEvidenceForClaimVersion,
 } from "../services/evidenceService";
+import {
+  ASSESSMENT_INITIATOR_TYPES,
+  AssessmentInitiatorType,
+  TrustedOperationContext,
+} from "../types/operationContext";
 
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -33,11 +42,18 @@ const assessmentFields = [
   "independence",
   "assessmentMethod",
   "rationale",
-  "assessedBy",
+  "respondsToAssessmentId",
+  "responseRelation",
 ] as const;
+
+const assessmentDimensionFields = assessmentFields.slice(0, 5);
 
 type CreateEvidenceOperation = typeof createEvidenceForClaimVersion;
 type CreateAssessmentOperation = typeof createEvidenceAssessment;
+type ResolveOperationContext = (
+  req: Request,
+  res: Response,
+) => TrustedOperationContext | undefined;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -52,6 +68,45 @@ function hasOnlyFields(
 
 function isOptionalNonEmptyString(value: unknown): boolean {
   return value === undefined || (typeof value === "string" && value.trim() !== "");
+}
+
+function defaultResolveOperationContext(
+  _req: Request,
+  res: Response,
+): TrustedOperationContext | undefined {
+  const context = (res.locals as Record<string, unknown> | undefined)
+    ?.operationContext;
+  if (context === undefined) {
+    return undefined;
+  }
+  if (!isRecord(context)) {
+    throw new Error("Invalid trusted operation context");
+  }
+
+  const initiator = context.initiator;
+  if (initiator === undefined) {
+    return {};
+  }
+  if (
+    !isRecord(initiator) ||
+    typeof initiator.type !== "string" ||
+    !ASSESSMENT_INITIATOR_TYPES.includes(
+      initiator.type as (typeof ASSESSMENT_INITIATOR_TYPES)[number],
+    ) ||
+    !(
+      initiator.id === null ||
+      (typeof initiator.id === "string" && initiator.id.trim() !== "")
+    )
+  ) {
+    throw new Error("Invalid trusted assessment initiator");
+  }
+
+  return {
+    initiator: {
+      type: initiator.type as AssessmentInitiatorType,
+      id: initiator.id,
+    },
+  };
 }
 
 function parseEvidenceInput(
@@ -119,7 +174,7 @@ function parseAssessmentInput(
     return undefined;
   }
 
-  for (const field of assessmentFields.slice(0, 5)) {
+  for (const field of assessmentDimensionFields) {
     const value = body[field];
     if (
       value !== undefined &&
@@ -129,10 +184,35 @@ function parseAssessmentInput(
     }
   }
 
-  for (const field of assessmentFields.slice(5)) {
-    if (!isOptionalNonEmptyString(body[field])) {
-      return undefined;
-    }
+  if (!assessmentDimensionFields.some((field) => body[field] !== undefined)) {
+    return undefined;
+  }
+  if (
+    typeof body.assessmentMethod !== "string" ||
+    !ASSESSMENT_METHODS.includes(
+      body.assessmentMethod as (typeof ASSESSMENT_METHODS)[number],
+    ) ||
+    typeof body.rationale !== "string" ||
+    body.rationale.trim().length === 0 ||
+    Array.from(body.rationale).length > 4000
+  ) {
+    return undefined;
+  }
+
+  const hasResponseTarget = body.respondsToAssessmentId !== undefined;
+  const hasResponseRelation = body.responseRelation !== undefined;
+  if (
+    hasResponseTarget !== hasResponseRelation ||
+    (hasResponseTarget &&
+      (typeof body.respondsToAssessmentId !== "string" ||
+        !uuidPattern.test(body.respondsToAssessmentId))) ||
+    (hasResponseRelation &&
+      (typeof body.responseRelation !== "string" ||
+        !ASSESSMENT_RESPONSE_RELATIONS.includes(
+          body.responseRelation as (typeof ASSESSMENT_RESPONSE_RELATIONS)[number],
+        )))
+  ) {
+    return undefined;
   }
 
   return {
@@ -144,9 +224,12 @@ function parseAssessmentInput(
     directness: body.directness as number | undefined,
     recency: body.recency as number | undefined,
     independence: body.independence as number | undefined,
-    assessmentMethod: body.assessmentMethod as string | undefined,
-    rationale: body.rationale as string | undefined,
-    assessedBy: body.assessedBy as string | undefined,
+    assessmentMethod:
+      body.assessmentMethod as CreateEvidenceAssessmentInput["assessmentMethod"],
+    rationale: body.rationale,
+    respondsToAssessmentId: body.respondsToAssessmentId as string | undefined,
+    responseRelation:
+      body.responseRelation as CreateEvidenceAssessmentInput["responseRelation"],
   };
 }
 
@@ -178,6 +261,7 @@ export function buildCreateEvidenceController(
 
 export function buildCreateEvidenceAssessmentController(
   createAssessment: CreateAssessmentOperation = createEvidenceAssessment,
+  resolveOperationContext: ResolveOperationContext = defaultResolveOperationContext,
 ) {
   return async function createEvidenceAssessmentController(
     req: Request,
@@ -198,10 +282,24 @@ export function buildCreateEvidenceAssessmentController(
     }
 
     try {
-      return res.status(201).json(await createAssessment(input));
+      const operationContext = resolveOperationContext(req, res);
+      return res
+        .status(201)
+        .json(await createAssessment({ ...input, operationContext }));
     } catch (error) {
       if (error instanceof EvidenceRelationNotFoundError) {
         return res.status(404).json({ error: "Evidence relation not found" });
+      }
+      if (error instanceof AssessmentResponseTargetNotFoundError) {
+        return res
+          .status(404)
+          .json({ error: "Assessment response target not found" });
+      }
+      if (error instanceof AssessmentGraphConflictError) {
+        return res.status(409).json({
+          error: "Assessment response graph conflict",
+          reason: error.reason,
+        });
       }
       return res
         .status(500)
