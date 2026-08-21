@@ -155,6 +155,12 @@ test("parallel version requests serialize on the claim and preserve append-only 
         status,
         publication_status,
         change_reason,
+        based_on_version_id,
+        actor_type,
+        actor_id,
+        source_type,
+        source_reference,
+        request_id,
         created_at
       FROM public.claim_versions
       WHERE claim_id = $1 AND version_number = 1`,
@@ -259,6 +265,12 @@ test("parallel version requests serialize on the claim and preserve append-only 
         status,
         publication_status,
         change_reason,
+        based_on_version_id,
+        actor_type,
+        actor_id,
+        source_type,
+        source_reference,
+        request_id,
         created_at
       FROM public.claim_versions
       WHERE claim_id = $1
@@ -276,6 +288,7 @@ test("parallel version requests serialize on the claim and preserve append-only 
     assert.equal(versionsAfter.rows[1].status, "draft");
     assert.equal(versionsAfter.rows[1].publication_status, "unpublished");
     assert.equal(versionsAfter.rows[1].change_reason, "parallel request A");
+    assert.equal(versionsAfter.rows[1].based_on_version_id, initialVersionBefore.id);
     assert.equal(versionsAfter.rows[2].claim_id, createdClaimId);
     assert.equal(versionsAfter.rows[2].status, "draft");
     assert.equal(versionsAfter.rows[2].publication_status, "unpublished");
@@ -283,6 +296,7 @@ test("parallel version requests serialize on the claim and preserve append-only 
       versionsAfter.rows[2].change_reason,
       "explicit revision based on version 2",
     );
+    assert.equal(versionsAfter.rows[2].based_on_version_id, versionsAfter.rows[1].id);
   } finally {
     if (createdClaimId) {
       await cleanupTestClaim(poolA, createdClaimId);

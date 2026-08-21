@@ -14,6 +14,11 @@ export interface CreateClaimVersionInput {
   language: string;
   claimType: string;
   changeReason: string;
+  actorType?: string;
+  actorId?: string;
+  sourceType?: string;
+  sourceReference?: string;
+  requestId?: string;
 }
 
 export interface CreatedClaimVersion {
@@ -38,6 +43,7 @@ interface ClaimRow extends QueryResultRow {
 }
 
 interface CurrentVersionRow extends QueryResultRow {
+  id: string;
   version_number: number;
 }
 
@@ -105,6 +111,7 @@ export async function createClaimVersion(
 ): Promise<CreatedClaimVersion> {
   const client = await pool.connect();
   const versionId = randomUUID();
+  const requestId = input.requestId ?? randomUUID();
   let transactionStarted = false;
   let destroyClient = false;
   let currentVersionNumber: number | undefined;
@@ -126,7 +133,7 @@ export async function createClaimVersion(
     }
 
     const currentVersionResult = await client.query<CurrentVersionRow>(
-      `SELECT version_number
+      `SELECT id, version_number
       FROM public.claim_versions
       WHERE claim_id = $1
       ORDER BY version_number DESC
@@ -156,8 +163,17 @@ export async function createClaimVersion(
         status,
         publication_status,
         change_reason,
+        based_on_version_id,
+        actor_type,
+        actor_id,
+        source_type,
+        source_reference,
+        request_id,
         created_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP)
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+        $11, $12, $13, $14, $15, $16, CURRENT_TIMESTAMP
+      )
       RETURNING
         id,
         claim_id,
@@ -181,6 +197,12 @@ export async function createClaimVersion(
         REVISION_STATUS,
         REVISION_PUBLICATION_STATUS,
         input.changeReason,
+        currentVersion.id,
+        input.actorType ?? "api",
+        input.actorId ?? null,
+        input.sourceType ?? "api",
+        input.sourceReference ?? null,
+        requestId,
       ],
     );
 
@@ -231,7 +253,7 @@ export async function createClaimVersion(
 
       try {
         const refreshedVersionResult = await client.query<CurrentVersionRow>(
-          `SELECT version_number
+          `SELECT id, version_number
           FROM public.claim_versions
           WHERE claim_id = $1
           ORDER BY version_number DESC

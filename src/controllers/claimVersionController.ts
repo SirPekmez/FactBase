@@ -18,6 +18,11 @@ const requestFields = [
   "language",
   "claimType",
   "changeReason",
+  "actorType",
+  "actorId",
+  "sourceType",
+  "sourceReference",
+  "requestId",
 ] as const;
 
 const POSTGRES_INTEGER_MAX = 2_147_483_647;
@@ -52,10 +57,31 @@ function readCreateClaimVersionInput(
     return undefined;
   }
 
-  for (const field of requestFields.slice(1)) {
+  for (const field of requestFields.slice(1, 6)) {
     if (typeof values[field] !== "string" || values[field].trim() === "") {
       return undefined;
     }
+  }
+
+  for (const field of [
+    "actorType",
+    "actorId",
+    "sourceType",
+    "sourceReference",
+  ] as const) {
+    if (
+      values[field] !== undefined &&
+      (typeof values[field] !== "string" || values[field].trim() === "")
+    ) {
+      return undefined;
+    }
+  }
+
+  if (
+    values.requestId !== undefined &&
+    (typeof values.requestId !== "string" || !uuidPattern.test(values.requestId))
+  ) {
+    return undefined;
   }
 
   return {
@@ -66,6 +92,21 @@ function readCreateClaimVersionInput(
     language: values.language as string,
     claimType: values.claimType as string,
     changeReason: values.changeReason as string,
+    ...(values.actorType === undefined
+      ? {}
+      : { actorType: values.actorType as string }),
+    ...(values.actorId === undefined
+      ? {}
+      : { actorId: values.actorId as string }),
+    ...(values.sourceType === undefined
+      ? {}
+      : { sourceType: values.sourceType as string }),
+    ...(values.sourceReference === undefined
+      ? {}
+      : { sourceReference: values.sourceReference as string }),
+    ...(values.requestId === undefined
+      ? {}
+      : { requestId: values.requestId as string }),
   };
 }
 
@@ -83,7 +124,7 @@ export function buildCreateClaimVersionController(
     if (!input) {
       return res.status(400).json({
         error:
-          "claimId must be a UUID; basedOnVersionNumber must be a positive integer no greater than 2147483647; title, normalizedStatement, language, claimType and changeReason must be non-empty strings; no other fields are accepted",
+          "claimId and requestId must be UUIDs; basedOnVersionNumber must be a positive integer no greater than 2147483647; title, normalizedStatement, language, claimType and changeReason must be non-empty strings; optional provenance fields must be non-empty strings; no other fields are accepted",
       });
     }
 

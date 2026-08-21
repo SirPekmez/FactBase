@@ -139,6 +139,8 @@ test("create version controller rejects invalid and server-owned fields with 400
       params: { claimId },
       body: createRequestBody({ basedOnVersionNumber: postgresIntegerMax + 1 }),
     },
+    { params: { claimId }, body: createRequestBody({ actorType: "   " }) },
+    { params: { claimId }, body: createRequestBody({ requestId: "invalid" }) },
     { params: { claimId }, body: createRequestBody({ changeReason: "   " }) },
     { params: { claimId }, body: createRequestBody({ title: "" }) },
     { params: { claimId }, body: createRequestBody({ versionNumber: 2 }) },
@@ -169,6 +171,33 @@ test("create version controller rejects invalid and server-owned fields with 400
       assert.equal(operationCalled, false);
     });
   }
+});
+
+test("create version controller accepts explicit provenance without changing server-owned state", async () => {
+  const {
+    buildCreateClaimVersionController,
+  } = require("../dist/controllers/claimVersionController");
+  const requestId = "77777777-7777-4777-8777-777777777777";
+  let receivedInput;
+  const handler = buildCreateClaimVersionController(async (input) => {
+    receivedInput = input;
+    return createExpectedVersion();
+  });
+  const response = createResponse();
+  const body = createRequestBody({
+    actorType: "user",
+    actorId: "editor-7",
+    sourceType: "manual",
+    sourceReference: "review-42",
+    requestId,
+  });
+
+  await handler({ params: { claimId }, body }, response);
+
+  assert.equal(response.statusCode, 201);
+  assert.deepEqual(receivedInput, { claimId, ...body });
+  assert.equal(Object.hasOwn(receivedInput, "status"), false);
+  assert.equal(Object.hasOwn(receivedInput, "publicationStatus"), false);
 });
 
 test("create version controller accepts generic UUID syntax and int4 boundaries", async (t) => {
@@ -297,6 +326,7 @@ function queryStage(text) {
 
 function createDatabaseHarness({
   claimExists = true,
+  currentVersionId = "33333333-3333-4333-8333-333333333333",
   currentVersionNumber = 1,
   currentVersionExists = true,
   refreshedVersionNumber = currentVersionNumber,
@@ -330,7 +360,7 @@ function createDatabaseHarness({
       if (stage === "SELECT CURRENT VERSION") {
         return {
           rows: currentVersionExists
-            ? [{ version_number: currentVersionNumber }]
+            ? [{ id: currentVersionId, version_number: currentVersionNumber }]
             : [],
         };
       }
@@ -338,7 +368,7 @@ function createDatabaseHarness({
       if (stage === "REFRESH CURRENT VERSION") {
         return {
           rows: refreshedVersionExists
-            ? [{ version_number: refreshedVersionNumber }]
+            ? [{ id: currentVersionId, version_number: refreshedVersionNumber }]
             : [],
         };
       }
@@ -394,9 +424,17 @@ function stagesOf(harness) {
 test("claim version service produces strict version sequence and server states", async (t) => {
   const { createClaimVersion } = require("../dist/services/claimVersionService");
 
-  for (const currentVersionNumber of [1, 2, 3]) {
+  const bases = [
+    { currentVersionNumber: 1, currentVersionId: "33333333-3333-4333-8333-333333333331" },
+    { currentVersionNumber: 2, currentVersionId: "33333333-3333-4333-8333-333333333332" },
+    { currentVersionNumber: 3, currentVersionId: "33333333-3333-4333-8333-333333333333" },
+  ];
+  for (const { currentVersionNumber, currentVersionId } of bases) {
     await t.test(`version ${currentVersionNumber + 1}`, async () => {
-      const harness = createDatabaseHarness({ currentVersionNumber });
+      const harness = createDatabaseHarness({
+        currentVersionNumber,
+        currentVersionId,
+      });
 
       const result = await createClaimVersion(
         serviceInput(currentVersionNumber),
@@ -422,6 +460,12 @@ test("claim version service produces strict version sequence and server states",
       assert.equal(insertValues[7], "draft");
       assert.equal(insertValues[8], "unpublished");
       assert.equal(insertValues[9], "Evidence was clarified");
+      assert.equal(insertValues[10], currentVersionId);
+      assert.equal(insertValues[11], "api");
+      assert.equal(insertValues[12], null);
+      assert.equal(insertValues[13], "api");
+      assert.equal(insertValues[14], null);
+      assert.match(insertValues[15], /^[0-9a-f-]{36}$/i);
       assert.equal(result.version.versionNumber, currentVersionNumber + 1);
       assert.equal(result.version.claimId, claimId);
       assert.equal(result.version.status, "draft");

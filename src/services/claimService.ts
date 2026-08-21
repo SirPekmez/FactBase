@@ -53,6 +53,7 @@ export async function createClaimWithInitialVersion(
   const client = await pool.connect();
   const claimId = randomUUID();
   const versionId = randomUUID();
+  const requestId = randomUUID();
   let transactionStarted = false;
   let destroyClient = false;
 
@@ -77,8 +78,17 @@ export async function createClaimWithInitialVersion(
         status,
         publication_status,
         change_reason,
+        based_on_version_id,
+        actor_type,
+        actor_id,
+        source_type,
+        source_reference,
+        request_id,
         created_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP)
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+        $11, $12, $13, $14, $15, $16, CURRENT_TIMESTAMP
+      )
       RETURNING
         id,
         claim_id,
@@ -102,6 +112,12 @@ export async function createClaimWithInitialVersion(
         INITIAL_STATUS,
         INITIAL_PUBLICATION_STATUS,
         INITIAL_CHANGE_REASON,
+        null,
+        "api",
+        null,
+        "api",
+        null,
+        requestId,
       ],
     );
 
