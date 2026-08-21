@@ -53,13 +53,207 @@ interface AssessmentRow extends QueryResultRow {
   initiator_id: string | null;
   responds_to_assessment_id: string | null;
   response_relation: string | null;
+  parent_assessment_id: string | null;
+  parent_relation_id: string | null;
   assessed_at: Date;
+}
+
+export const ASSESSMENT_GRAPH_ANOMALY_CODES = [
+  "missing_parent",
+  "cross_relation_parent",
+  "incomplete_response_pair",
+  "invalid_response_relation",
+  "self_response",
+  "cycle",
+] as const;
+
+export type AssessmentGraphAnomalyCode =
+  (typeof ASSESSMENT_GRAPH_ANOMALY_CODES)[number];
+
+export interface AssessmentGraphAnomaly {
+  code: AssessmentGraphAnomalyCode;
+  assessmentIds: string[];
+  relatedAssessmentId: string | null;
+  relatedClaimVersionEvidenceId: string | null;
+  rawResponseRelation: string | null;
+}
+
+interface AssessmentGraph {
+  unparentedAssessmentIds: string[];
+  integrity: {
+    status: "valid" | "anomalies_detected";
+    anomalies: AssessmentGraphAnomaly[];
+  };
 }
 
 type ReadPool = Pick<Pool, "connect">;
 
 function optionalNumber(value: string | number | null): number | null {
   return value === null ? null : Number(value);
+}
+
+const responseRelations = new Set([
+  "supports",
+  "disputes",
+  "contextualizes",
+]);
+
+function compareAnomalies(
+  left: AssessmentGraphAnomaly,
+  right: AssessmentGraphAnomaly,
+): number {
+  const codeDifference =
+    ASSESSMENT_GRAPH_ANOMALY_CODES.indexOf(left.code) -
+    ASSESSMENT_GRAPH_ANOMALY_CODES.indexOf(right.code);
+  if (codeDifference !== 0) {
+    return codeDifference;
+  }
+
+  const leftKey = JSON.stringify([
+    left.assessmentIds,
+    left.relatedAssessmentId,
+    left.relatedClaimVersionEvidenceId,
+    left.rawResponseRelation,
+  ]);
+  const rightKey = JSON.stringify([
+    right.assessmentIds,
+    right.relatedAssessmentId,
+    right.relatedClaimVersionEvidenceId,
+    right.rawResponseRelation,
+  ]);
+  return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+}
+
+export function buildAssessmentGraph(
+  assessments: ReadonlyArray<AssessmentRow>,
+  relationId: string,
+): AssessmentGraph {
+  const anomalies: AssessmentGraphAnomaly[] = [];
+  const assessmentsById = new Map(
+    assessments.map((assessment) => [assessment.id, assessment]),
+  );
+  const unparentedAssessmentIds = assessments
+    .filter((assessment) => assessment.responds_to_assessment_id === null)
+    .map((assessment) => assessment.id);
+
+  for (const assessment of assessments) {
+    const parentId = assessment.responds_to_assessment_id;
+    const responseRelation = assessment.response_relation;
+    const hasParent = parentId !== null;
+    const hasRelation = responseRelation !== null;
+
+    if (hasParent !== hasRelation) {
+      anomalies.push({
+        code: "incomplete_response_pair",
+        assessmentIds: [assessment.id],
+        relatedAssessmentId: parentId,
+        relatedClaimVersionEvidenceId: assessment.parent_relation_id,
+        rawResponseRelation: responseRelation,
+      });
+    }
+
+    if (responseRelation !== null && !responseRelations.has(responseRelation)) {
+      anomalies.push({
+        code: "invalid_response_relation",
+        assessmentIds: [assessment.id],
+        relatedAssessmentId: parentId,
+        relatedClaimVersionEvidenceId: assessment.parent_relation_id,
+        rawResponseRelation: responseRelation,
+      });
+    }
+
+    if (parentId === null) {
+      continue;
+    }
+    if (parentId === assessment.id) {
+      anomalies.push({
+        code: "self_response",
+        assessmentIds: [assessment.id],
+        relatedAssessmentId: parentId,
+        relatedClaimVersionEvidenceId: assessment.parent_relation_id,
+        rawResponseRelation: responseRelation,
+      });
+      continue;
+    }
+    if (assessment.parent_assessment_id === null) {
+      anomalies.push({
+        code: "missing_parent",
+        assessmentIds: [assessment.id],
+        relatedAssessmentId: parentId,
+        relatedClaimVersionEvidenceId: null,
+        rawResponseRelation: responseRelation,
+      });
+      continue;
+    }
+    if (assessment.parent_relation_id !== relationId) {
+      anomalies.push({
+        code: "cross_relation_parent",
+        assessmentIds: [assessment.id],
+        relatedAssessmentId: parentId,
+        relatedClaimVersionEvidenceId: assessment.parent_relation_id,
+        rawResponseRelation: responseRelation,
+      });
+    }
+  }
+
+  const processed = new Set<string>();
+  for (const assessment of assessments) {
+    if (processed.has(assessment.id)) {
+      continue;
+    }
+
+    const path: string[] = [];
+    const pathIndexes = new Map<string, number>();
+    let currentId: string | null = assessment.id;
+
+    while (currentId !== null && !processed.has(currentId)) {
+      const cycleStart = pathIndexes.get(currentId);
+      if (cycleStart !== undefined) {
+        const cycleIds = path.slice(cycleStart).sort();
+        if (cycleIds.length > 1) {
+          anomalies.push({
+            code: "cycle",
+            assessmentIds: cycleIds,
+            relatedAssessmentId: null,
+            relatedClaimVersionEvidenceId: relationId,
+            rawResponseRelation: null,
+          });
+        }
+        break;
+      }
+
+      const current = assessmentsById.get(currentId);
+      if (!current) {
+        break;
+      }
+      pathIndexes.set(currentId, path.length);
+      path.push(currentId);
+
+      const parentId = current.responds_to_assessment_id;
+      if (
+        parentId === null ||
+        parentId === current.id ||
+        current.parent_assessment_id === null ||
+        current.parent_relation_id !== relationId
+      ) {
+        break;
+      }
+      currentId = parentId;
+    }
+
+    for (const id of path) {
+      processed.add(id);
+    }
+  }
+
+  anomalies.sort(compareAnomalies);
+  return {
+    unparentedAssessmentIds,
+    integrity: {
+      status: anomalies.length === 0 ? "valid" : "anomalies_detected",
+      anomalies,
+    },
+  };
 }
 
 async function loadClaimVersion(
@@ -132,10 +326,14 @@ async function loadClaimVersion(
       ea.initiator_id,
       ea.responds_to_assessment_id,
       ea.response_relation,
+      parent.id AS parent_assessment_id,
+      parent.claim_version_evidence_id AS parent_relation_id,
       ea.assessed_at
     FROM public.evidence_assessments ea
     INNER JOIN public.claim_version_evidence cve
       ON cve.id = ea.claim_version_evidence_id
+    LEFT JOIN public.evidence_assessments parent
+      ON parent.id = ea.responds_to_assessment_id
     WHERE cve.claim_version_id = $1
     ORDER BY ea.assessed_at, ea.id`,
     [versionId],
@@ -173,22 +371,25 @@ async function loadClaimVersion(
       requestId: version.request_id,
       createdAt: version.created_at,
     },
-    evidence: evidenceResult.rows.map((evidence) => ({
-      id: evidence.evidence_id,
-      relationId: evidence.relation_id,
-      relation: evidence.relation,
-      sourceUrl: evidence.source_url,
-      sourceTitle: evidence.source_title,
-      sourceType: evidence.source_type,
-      locator: evidence.locator,
-      quotedText: evidence.quoted_text,
-      snapshotHash: evidence.snapshot_hash,
-      retrievedAt: evidence.retrieved_at,
-      createdAt: evidence.evidence_created_at,
-      relationCreatedAt: evidence.relation_created_at,
-      assessments: (assessmentsByRelation.get(evidence.relation_id) ?? []).map(
-        (assessment) => ({
+    evidence: evidenceResult.rows.map((evidence) => {
+      const relationAssessments =
+        assessmentsByRelation.get(evidence.relation_id) ?? [];
+      return {
+        id: evidence.evidence_id,
+        relationId: evidence.relation_id,
+        relation: evidence.relation,
+        sourceUrl: evidence.source_url,
+        sourceTitle: evidence.source_title,
+        sourceType: evidence.source_type,
+        locator: evidence.locator,
+        quotedText: evidence.quoted_text,
+        snapshotHash: evidence.snapshot_hash,
+        retrievedAt: evidence.retrieved_at,
+        createdAt: evidence.evidence_created_at,
+        relationCreatedAt: evidence.relation_created_at,
+        assessments: relationAssessments.map((assessment) => ({
           id: assessment.id,
+          claimVersionEvidenceId: assessment.relation_id,
           sourceQuality: optionalNumber(assessment.source_quality),
           relevance: optionalNumber(assessment.relevance),
           directness: optionalNumber(assessment.directness),
@@ -204,7 +405,8 @@ async function loadClaimVersion(
                   id: assessment.initiator_id,
                 },
           responseTo:
-            assessment.responds_to_assessment_id === null
+            assessment.responds_to_assessment_id === null &&
+            assessment.response_relation === null
               ? null
               : {
                   assessmentId: assessment.responds_to_assessment_id,
@@ -212,9 +414,13 @@ async function loadClaimVersion(
                 },
           legacyAssessedBy: assessment.assessed_by,
           assessedAt: assessment.assessed_at,
-        }),
-      ),
-    })),
+        })),
+        assessmentGraph: buildAssessmentGraph(
+          relationAssessments,
+          evidence.relation_id,
+        ),
+      };
+    }),
   };
 }
 
@@ -228,7 +434,12 @@ export async function getClaimVersionDetails(
   return runInTransaction(
     pool,
     "Claim version read failed and the transaction could not be rolled back",
-    (client) => loadClaimVersion(client, claimId, versionId),
+    async (client) => {
+      await client.query(
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+      );
+      return loadClaimVersion(client, claimId, versionId);
+    },
   );
 }
 

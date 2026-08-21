@@ -890,7 +890,7 @@ function evidenceRow(relationId, id, relation) {
   };
 }
 
-function readHarness() {
+function readHarness(options = {}) {
   const releases = [];
   const versions = new Map([
     [versionOneId, versionRow(versionOneId)],
@@ -920,19 +920,37 @@ function readHarness() {
       independence: "1", assessment_method: "manual", rationale: "Original",
       assessed_by: "legacy-reviewer", initiator_type: null, initiator_id: null,
       responds_to_assessment_id: null, response_relation: null,
+      parent_assessment_id: null, parent_relation_id: null,
       assessed_at: new Date("2026-08-21T06:03:00.000Z"),
     }]],
-    [versionTwoId, [{
-      id: "b2222222-2222-4222-8222-222222222222",
-      relation_id: "a3333333-3333-4333-8333-333333333333",
-      source_quality: "0.5", relevance: "1", directness: "0.6", recency: "0.7",
-      independence: "1", assessment_method: "manual", rationale: "Reassessed",
-      assessed_by: null, initiator_type: "human", initiator_id: "verified-reviewer",
-      responds_to_assessment_id: "b1111111-1111-4111-8111-111111111111",
-      response_relation: "disputes",
-      assessed_at: new Date("2026-08-21T06:04:00.000Z"),
-    }]],
+    [versionTwoId, [
+      {
+        id: "b2000000-0000-4000-8000-000000000000",
+        relation_id: "a3333333-3333-4333-8333-333333333333",
+        source_quality: null, relevance: "0", directness: "1", recency: null,
+        independence: null, assessment_method: "manual", rationale: "Basis",
+        assessed_by: null, initiator_type: null, initiator_id: null,
+        responds_to_assessment_id: null, response_relation: null,
+        parent_assessment_id: null, parent_relation_id: null,
+        assessed_at: new Date("2026-08-21T06:03:30.000Z"),
+      },
+      {
+        id: "b2222222-2222-4222-8222-222222222222",
+        relation_id: "a3333333-3333-4333-8333-333333333333",
+        source_quality: "0.5", relevance: "1", directness: "0.6", recency: "0.7",
+        independence: "1", assessment_method: "manual", rationale: "Reassessed",
+        assessed_by: null, initiator_type: "human", initiator_id: "verified-reviewer",
+        responds_to_assessment_id: "b2000000-0000-4000-8000-000000000000",
+        response_relation: "disputes",
+        parent_assessment_id: "b2000000-0000-4000-8000-000000000000",
+        parent_relation_id: "a3333333-3333-4333-8333-333333333333",
+        assessed_at: new Date("2026-08-21T06:04:00.000Z"),
+      },
+    ]],
   ]);
+  if (options.versionTwoAssessments) {
+    assessments.set(versionTwoId, options.versionTwoAssessments);
+  }
   let activeVersionId;
   const client = {
     async query(sql, values) {
@@ -964,14 +982,24 @@ test("read model joins explicit provenance, evidence and assessments", async () 
   assert.equal(result.version.basedOnVersionId, versionOneId);
   assert.deepEqual(result.version.actor, { type: "api", id: "editor-1" });
   assert.equal(result.evidence[0].relation, "contradicts");
-  assert.equal(result.evidence[0].assessments[0].sourceQuality, 0.5);
-  assert.equal(result.evidence[0].assessments[0].rationale, "Reassessed");
-  assert.deepEqual(result.evidence[0].assessments[0].initiator, {
+  const base = result.evidence[0].assessments[0];
+  const response = result.evidence[0].assessments[1];
+  assert.equal(base.sourceQuality, null);
+  assert.equal(base.relevance, 0);
+  assert.equal(base.directness, 1);
+  assert.equal(response.sourceQuality, 0.5);
+  assert.equal(response.rationale, "Reassessed");
+  assert.equal(response.claimVersionEvidenceId, result.evidence[0].relationId);
+  assert.deepEqual(response.initiator, {
     type: "human", id: "verified-reviewer",
   });
-  assert.deepEqual(result.evidence[0].assessments[0].responseTo, {
-    assessmentId: "b1111111-1111-4111-8111-111111111111",
+  assert.deepEqual(response.responseTo, {
+    assessmentId: "b2000000-0000-4000-8000-000000000000",
     relation: "disputes",
+  });
+  assert.deepEqual(result.evidence[0].assessmentGraph, {
+    unparentedAssessmentIds: ["b2000000-0000-4000-8000-000000000000"],
+    integrity: { status: "valid", anomalies: [] },
   });
   const legacy = await getClaimVersionDetails(claimId, versionOneId, readHarness().pool);
   assert.equal(
@@ -980,6 +1008,155 @@ test("read model joins explicit provenance, evidence and assessments", async () 
   );
   assert.equal(legacy.evidence[0].assessments[0].initiator, null);
   assert.deepEqual(harness.releases, [[]]);
+});
+
+function graphAssessment(id, parentId, options = {}) {
+  const relationId = options.relationId ?? "graph-relation";
+  const parentExists = options.parentExists ?? parentId !== null;
+  return {
+    id,
+    relation_id: relationId,
+    responds_to_assessment_id: parentId,
+    response_relation:
+      options.responseRelation === undefined
+        ? parentId === null ? null : "supports"
+        : options.responseRelation,
+    parent_assessment_id: parentExists ? parentId : null,
+    parent_relation_id:
+      parentExists
+        ? options.parentRelationId ?? relationId
+        : null,
+  };
+}
+
+test("assessment graph reports every controlled anomaly deterministically", () => {
+  const { buildAssessmentGraph } = require("../dist/services/claimVersionReadService");
+  const rows = [
+    graphAssessment("unparented", null),
+    graphAssessment("missing-z", "absent-z", { parentExists: false }),
+    graphAssessment("missing-a", "absent-a", { parentExists: false }),
+    graphAssessment("cross", "external", { parentRelationId: "other-relation" }),
+    graphAssessment("incomplete", null, { responseRelation: "disputes" }),
+    graphAssessment("invalid", "unparented", { responseRelation: "rebuts" }),
+    graphAssessment("self", "self"),
+    graphAssessment("cycle-b", "cycle-a"),
+    graphAssessment("cycle-a", "cycle-b"),
+  ];
+
+  const graph = buildAssessmentGraph(rows, "graph-relation");
+  assert.deepEqual(graph.unparentedAssessmentIds, ["unparented", "incomplete"]);
+  assert.deepEqual(
+    graph.integrity.anomalies.map((anomaly) => anomaly.code),
+    [
+      "missing_parent",
+      "missing_parent",
+      "cross_relation_parent",
+      "incomplete_response_pair",
+      "invalid_response_relation",
+      "self_response",
+      "cycle",
+    ],
+  );
+  assert.deepEqual(
+    graph.integrity.anomalies.slice(0, 2).map((anomaly) => anomaly.assessmentIds),
+    [["missing-a"], ["missing-z"]],
+  );
+  assert.deepEqual(
+    graph.integrity.anomalies.at(-1).assessmentIds,
+    ["cycle-a", "cycle-b"],
+  );
+  assert.equal(graph.integrity.status, "anomalies_detected");
+});
+
+test("assessment graph handles a deep chain and multiple children without duplication", () => {
+  const { buildAssessmentGraph } = require("../dist/services/claimVersionReadService");
+  const rows = [graphAssessment("node-0000", null)];
+  for (let index = 1; index <= 2000; index += 1) {
+    rows.push(
+      graphAssessment(
+        `node-${String(index).padStart(4, "0")}`,
+        `node-${String(index - 1).padStart(4, "0")}`,
+      ),
+    );
+  }
+  rows.push(graphAssessment("sibling-a", "node-0000"));
+  rows.push(graphAssessment("sibling-b", "node-0000"));
+
+  const graph = buildAssessmentGraph(rows, "graph-relation");
+  assert.deepEqual(graph, {
+    unparentedAssessmentIds: ["node-0000"],
+    integrity: { status: "valid", anomalies: [] },
+  });
+  assert.equal(new Set(rows.map((row) => row.id)).size, rows.length);
+});
+
+test("read model preserves incomplete response raw values", async () => {
+  const { getClaimVersionDetails } = require("../dist/services/claimVersionReadService");
+  const malformedId = "b9000000-0000-4000-8000-000000000000";
+  const malformed = {
+    id: malformedId,
+    relation_id: "a3333333-3333-4333-8333-333333333333",
+    source_quality: "0", relevance: null, directness: "1", recency: null,
+    independence: null, assessment_method: null, rationale: null,
+    assessed_by: "legacy-label", initiator_type: null, initiator_id: null,
+    responds_to_assessment_id: null, response_relation: "disputes",
+    parent_assessment_id: null, parent_relation_id: null,
+    assessed_at: new Date("2026-08-21T06:05:00.000Z"),
+  };
+  const result = await getClaimVersionDetails(
+    claimId,
+    versionTwoId,
+    readHarness({ versionTwoAssessments: [malformed] }).pool,
+  );
+  const assessment = result.evidence[0].assessments[0];
+  assert.equal(assessment.id, malformedId);
+  assert.deepEqual(assessment.responseTo, {
+    assessmentId: null,
+    relation: "disputes",
+  });
+  assert.equal(assessment.legacyAssessedBy, "legacy-label");
+  assert.deepEqual(result.evidence[0].assessmentGraph.unparentedAssessmentIds, [
+    malformedId,
+  ]);
+  assert.deepEqual(
+    result.evidence[0].assessmentGraph.integrity.anomalies.map(({ code }) => code),
+    ["incomplete_response_pair"],
+  );
+});
+
+test("claim-version controller returns graph anomalies with HTTP 200", async () => {
+  const {
+    buildGetClaimVersionController,
+  } = require("../dist/controllers/claimVersionReadController");
+  const expected = {
+    claimId,
+    evidence: [{
+      assessments: [],
+      assessmentGraph: {
+        unparentedAssessmentIds: [],
+        integrity: {
+          status: "anomalies_detected",
+          anomalies: [{
+            code: "missing_parent",
+            assessmentIds: [assessmentOneId],
+            relatedAssessmentId: "missing",
+            relatedClaimVersionEvidenceId: null,
+            rawResponseRelation: "disputes",
+          }],
+        },
+      },
+    }],
+  };
+  const handler = buildGetClaimVersionController(async () => expected);
+  const res = response();
+
+  await handler(
+    { params: { claimId, versionId: versionOneId } },
+    res,
+  );
+
+  assert.equal(res.statusCode, 200);
+  assert.strictEqual(res.body, expected);
 });
 
 test("version diff reports only deterministic content, provenance, evidence, assessment and state changes", async () => {
@@ -995,7 +1172,10 @@ test("version diff reports only deterministic content, provenance, evidence, ass
     relationChanged: [{ evidenceId: evidenceOneId, from: "supports", to: "contradicts" }],
   });
   assert.deepEqual(result.assessmentChanges, {
-    added: ["b2222222-2222-4222-8222-222222222222"],
+    added: [
+      "b2000000-0000-4000-8000-000000000000",
+      "b2222222-2222-4222-8222-222222222222",
+    ],
   });
   assert.deepEqual(result.stateChanges, {
     status: { from: "published", to: "draft" },
