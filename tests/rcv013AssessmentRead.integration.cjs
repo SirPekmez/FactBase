@@ -32,6 +32,11 @@ async function cleanup(pool, ids) {
     await client.query("BEGIN");
     if (ids.assessmentIds.length > 0) {
       await client.query(
+        `DELETE FROM public.evidence_assessment_independence_comparisons
+        WHERE assessment_id = ANY($1::uuid[])`,
+        [ids.assessmentIds],
+      );
+      await client.query(
         "DELETE FROM public.evidence_assessments WHERE id = ANY($1::uuid[])",
         [ids.assessmentIds],
       );
@@ -124,13 +129,16 @@ test("claim-version read uses one repeatable read-only snapshot", async () => {
       `INSERT INTO public.evidence_assessments (
         id, claim_version_evidence_id, source_quality, relevance,
         assessment_method, rationale, assessed_by, initiator_type,
-        initiator_id, responds_to_assessment_id, response_relation, assessed_at
+        initiator_id, responds_to_assessment_id, response_relation,
+        rubric_id, rubric_version, assessed_at
       ) VALUES
         ($1, $3, 0, NULL, 'manual', 'Legacy-labelled child.',
           'legacy-reviewer', NULL, NULL, $4, 'supports',
+          'factbase-evidence-assessment', '1',
           (SELECT assessed_at FROM public.evidence_assessments WHERE id = $4)),
         ($2, $3, NULL, 1, 'manual', 'Trusted child.',
           NULL, 'human', 'verified-reader', $4, 'contextualizes',
+          'factbase-evidence-assessment', '1',
           (SELECT assessed_at FROM public.evidence_assessments WHERE id = $4))`,
       [
         siblingIds[0],
@@ -213,6 +221,8 @@ test("claim-version read uses one repeatable read-only snapshot", async () => {
         evidenceId: evidence.evidence.id,
         directness: 0.5,
         assessmentMethod: "rules_based",
+        ruleSetId: "rcv013-snapshot-rules",
+        ruleSetVersion: "1",
         rationale: "Committed after the reader established its snapshot.",
         respondsToAssessmentId: siblingIds[0],
         responseRelation: "disputes",

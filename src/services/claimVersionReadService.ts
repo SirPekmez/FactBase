@@ -55,7 +55,24 @@ interface AssessmentRow extends QueryResultRow {
   response_relation: string | null;
   parent_assessment_id: string | null;
   parent_relation_id: string | null;
+  rubric_id: string | null;
+  rubric_version: string | null;
+  recency_reference_type: string | null;
+  recency_reference_at: Date | null;
+  rule_set_id: string | null;
+  rule_set_version: string | null;
+  model_id: string | null;
+  model_version: string | null;
+  model_process_type: string | null;
+  model_process_version: string | null;
+  import_reference_type: string | null;
+  import_reference: string | null;
   assessed_at: Date;
+}
+
+interface IndependenceComparisonRow extends QueryResultRow {
+  assessment_id: string;
+  comparison_claim_version_evidence_id: string;
 }
 
 export const ASSESSMENT_GRAPH_ANOMALY_CODES = [
@@ -326,6 +343,18 @@ async function loadClaimVersion(
       ea.initiator_id,
       ea.responds_to_assessment_id,
       ea.response_relation,
+      ea.rubric_id,
+      ea.rubric_version,
+      ea.recency_reference_type,
+      ea.recency_reference_at,
+      ea.rule_set_id,
+      ea.rule_set_version,
+      ea.model_id,
+      ea.model_version,
+      ea.model_process_type,
+      ea.model_process_version,
+      ea.import_reference_type,
+      ea.import_reference,
       parent.id AS parent_assessment_id,
       parent.claim_version_evidence_id AS parent_relation_id,
       ea.assessed_at
@@ -338,6 +367,30 @@ async function loadClaimVersion(
     ORDER BY ea.assessed_at, ea.id`,
     [versionId],
   );
+
+  const comparisonResult = await client.query<IndependenceComparisonRow>(
+    `SELECT
+      eaic.assessment_id,
+      eaic.comparison_claim_version_evidence_id
+    FROM public.evidence_assessment_independence_comparisons eaic
+    INNER JOIN public.evidence_assessments ea
+      ON ea.id = eaic.assessment_id
+    INNER JOIN public.claim_version_evidence cve
+      ON cve.id = ea.claim_version_evidence_id
+    WHERE cve.claim_version_id = $1
+    ORDER BY
+      eaic.assessment_id,
+      eaic.comparison_claim_version_evidence_id`,
+    [versionId],
+  );
+
+  const comparisonsByAssessment = new Map<string, string[]>();
+  for (const comparison of comparisonResult.rows) {
+    const comparisons =
+      comparisonsByAssessment.get(comparison.assessment_id) ?? [];
+    comparisons.push(comparison.comparison_claim_version_evidence_id);
+    comparisonsByAssessment.set(comparison.assessment_id, comparisons);
+  }
 
   const assessmentsByRelation = new Map<string, AssessmentRow[]>();
   for (const assessment of assessmentResult.rows) {
@@ -396,6 +449,54 @@ async function loadClaimVersion(
           recency: optionalNumber(assessment.recency),
           independence: optionalNumber(assessment.independence),
           assessmentMethod: assessment.assessment_method,
+          rubric:
+            assessment.rubric_id === null && assessment.rubric_version === null
+              ? null
+              : {
+                  id: assessment.rubric_id,
+                  version: assessment.rubric_version,
+                },
+          recencyContext:
+            assessment.recency_reference_type === null &&
+            assessment.recency_reference_at === null
+              ? null
+              : {
+                  referenceType: assessment.recency_reference_type,
+                  referenceAt: assessment.recency_reference_at,
+                },
+          independenceComparisonRelationIds:
+            comparisonsByAssessment.get(assessment.id) ?? [],
+          method: {
+            type: assessment.assessment_method,
+            ruleSet:
+              assessment.rule_set_id === null &&
+              assessment.rule_set_version === null
+                ? null
+                : {
+                    id: assessment.rule_set_id,
+                    version: assessment.rule_set_version,
+                  },
+            model:
+              assessment.model_id === null &&
+              assessment.model_version === null &&
+              assessment.model_process_type === null &&
+              assessment.model_process_version === null
+                ? null
+                : {
+                    id: assessment.model_id,
+                    version: assessment.model_version,
+                    processType: assessment.model_process_type,
+                    processVersion: assessment.model_process_version,
+                  },
+            imported:
+              assessment.import_reference_type === null &&
+              assessment.import_reference === null
+                ? null
+                : {
+                    referenceType: assessment.import_reference_type,
+                    reference: assessment.import_reference,
+                  },
+          },
           rationale: assessment.rationale,
           initiator:
             assessment.initiator_type === null

@@ -22,6 +22,11 @@ async function cleanup(pool, ids) {
     await client.query("BEGIN");
     if (ids.assessmentIds.length > 0) {
       await client.query(
+        `DELETE FROM public.evidence_assessment_independence_comparisons
+        WHERE assessment_id = ANY($1::uuid[])`,
+        [ids.assessmentIds],
+      );
+      await client.query(
         "DELETE FROM public.evidence_assessments WHERE id = ANY($1::uuid[])",
         [ids.assessmentIds],
       );
@@ -75,10 +80,10 @@ async function expectConstraint(pool, expectedConstraint, relationId, overrides 
         id, claim_version_evidence_id, source_quality, relevance, directness,
         recency, independence, assessment_method, rationale, assessed_by,
         initiator_type, initiator_id, responds_to_assessment_id,
-        response_relation, assessed_at
+        response_relation, rubric_id, rubric_version, assessed_at
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-        CURRENT_TIMESTAMP
+        'factbase-evidence-assessment', '1', CURRENT_TIMESTAMP
       )`,
       [
         values.id, values.relationId, values.sourceQuality, values.relevance,
@@ -206,6 +211,14 @@ test("RCV-011 assessments are append-only, attributable and explicitly related",
           evidenceId: firstEvidence.evidence.id,
           directness: relation === "supports" ? 1 : 0.5,
           assessmentMethod: relation === "contextualizes" ? "model_assisted" : "manual",
+          ...(relation === "contextualizes"
+            ? {
+                modelId: "rcv011-integration-model",
+                modelVersion: "1",
+                modelProcessType: "workflow",
+                modelProcessVersion: "1",
+              }
+            : {}),
           rationale: `Explicit ${relation} response`,
           respondsToAssessmentId: root.assessment.id,
           responseRelation: relation,
@@ -255,8 +268,9 @@ test("RCV-011 assessments are append-only, attributable and explicitly related",
     await pool.query(
       `INSERT INTO public.evidence_assessments (
         id, claim_version_evidence_id, source_quality, assessment_method,
-        rationale, assessed_by, assessed_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)`,
+        rationale, assessed_by, rubric_id, rubric_version, assessed_at
+      ) VALUES ($1, $2, $3, $4, $5, $6,
+        'factbase-evidence-assessment', '1', CURRENT_TIMESTAMP)`,
       [
         legacyId,
         firstEvidence.evidence.relationId,

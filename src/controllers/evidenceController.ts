@@ -2,6 +2,9 @@ import { Request, Response } from "express";
 import {
   ASSESSMENT_METHODS,
   ASSESSMENT_RESPONSE_RELATIONS,
+  IMPORT_REFERENCE_TYPES,
+  MODEL_PROCESS_TYPES,
+  RECENCY_REFERENCE_TYPES,
   AssessmentGraphConflictError,
   AssessmentResponseTargetNotFoundError,
   ClaimVersionNotFoundError,
@@ -9,6 +12,7 @@ import {
   CreateEvidenceInput,
   EVIDENCE_RELATIONS,
   EvidenceRelationNotFoundError,
+  IndependenceComparisonError,
   createEvidenceAssessment,
   createEvidenceForClaimVersion,
 } from "../services/evidenceService";
@@ -42,6 +46,17 @@ const assessmentFields = [
   "independence",
   "assessmentMethod",
   "rationale",
+  "recencyReferenceType",
+  "recencyReferenceAt",
+  "independenceComparisonRelationIds",
+  "ruleSetId",
+  "ruleSetVersion",
+  "modelId",
+  "modelVersion",
+  "modelProcessType",
+  "modelProcessVersion",
+  "importReferenceType",
+  "importReference",
   "respondsToAssessmentId",
   "responseRelation",
 ] as const;
@@ -199,6 +214,102 @@ function parseAssessmentInput(
     return undefined;
   }
 
+  const hasRecency = body.recency !== undefined;
+  const hasRecencyType = body.recencyReferenceType !== undefined;
+  const hasRecencyAt = body.recencyReferenceAt !== undefined;
+  if (
+    hasRecency !== hasRecencyType ||
+    hasRecency !== hasRecencyAt ||
+    (hasRecencyType &&
+      (typeof body.recencyReferenceType !== "string" ||
+        !RECENCY_REFERENCE_TYPES.includes(
+          body.recencyReferenceType as (typeof RECENCY_REFERENCE_TYPES)[number],
+        ))) ||
+    (hasRecencyAt &&
+      (typeof body.recencyReferenceAt !== "string" ||
+        !timestampPattern.test(body.recencyReferenceAt) ||
+        !Number.isFinite(Date.parse(body.recencyReferenceAt))))
+  ) {
+    return undefined;
+  }
+
+  const hasIndependence = body.independence !== undefined;
+  if (hasIndependence !== (body.independenceComparisonRelationIds !== undefined)) {
+    return undefined;
+  }
+  let normalizedComparisonRelationIds: string[] | undefined;
+  if (
+    hasIndependence &&
+    (!Array.isArray(body.independenceComparisonRelationIds) ||
+      body.independenceComparisonRelationIds.length === 0 ||
+      body.independenceComparisonRelationIds.some(
+        (value) => typeof value !== "string" || !uuidPattern.test(value),
+      ))
+  ) {
+    return undefined;
+  }
+  if (hasIndependence) {
+    normalizedComparisonRelationIds = (
+      body.independenceComparisonRelationIds as string[]
+    ).map((value) => value.toLowerCase());
+    if (
+      new Set(normalizedComparisonRelationIds).size !==
+      normalizedComparisonRelationIds.length
+    ) {
+      return undefined;
+    }
+  }
+
+  const methodStringFields = [
+    "ruleSetId",
+    "ruleSetVersion",
+    "modelId",
+    "modelVersion",
+    "modelProcessVersion",
+    "importReference",
+  ] as const;
+  if (methodStringFields.some((field) => !isOptionalNonEmptyString(body[field]))) {
+    return undefined;
+  }
+
+  const hasRuleSet = body.ruleSetId !== undefined || body.ruleSetVersion !== undefined;
+  const hasModel =
+    body.modelId !== undefined ||
+    body.modelVersion !== undefined ||
+    body.modelProcessType !== undefined ||
+    body.modelProcessVersion !== undefined;
+  const hasImport =
+    body.importReferenceType !== undefined || body.importReference !== undefined;
+
+  if (
+    (body.assessmentMethod === "manual" && (hasRuleSet || hasModel || hasImport)) ||
+    (body.assessmentMethod === "rules_based" &&
+      (typeof body.ruleSetId !== "string" ||
+        typeof body.ruleSetVersion !== "string" ||
+        hasModel ||
+        hasImport)) ||
+    (body.assessmentMethod === "model_assisted" &&
+      (typeof body.modelId !== "string" ||
+        typeof body.modelVersion !== "string" ||
+        typeof body.modelProcessType !== "string" ||
+        !MODEL_PROCESS_TYPES.includes(
+          body.modelProcessType as (typeof MODEL_PROCESS_TYPES)[number],
+        ) ||
+        typeof body.modelProcessVersion !== "string" ||
+        hasRuleSet ||
+        hasImport)) ||
+    (body.assessmentMethod === "imported" &&
+      (typeof body.importReferenceType !== "string" ||
+        !IMPORT_REFERENCE_TYPES.includes(
+          body.importReferenceType as (typeof IMPORT_REFERENCE_TYPES)[number],
+        ) ||
+        typeof body.importReference !== "string" ||
+        hasRuleSet ||
+        hasModel))
+  ) {
+    return undefined;
+  }
+
   const hasResponseTarget = body.respondsToAssessmentId !== undefined;
   const hasResponseRelation = body.responseRelation !== undefined;
   if (
@@ -227,6 +338,23 @@ function parseAssessmentInput(
     assessmentMethod:
       body.assessmentMethod as CreateEvidenceAssessmentInput["assessmentMethod"],
     rationale: body.rationale,
+    recencyReferenceType:
+      body.recencyReferenceType as CreateEvidenceAssessmentInput["recencyReferenceType"],
+    recencyReferenceAt:
+      typeof body.recencyReferenceAt === "string"
+        ? new Date(body.recencyReferenceAt)
+        : undefined,
+    independenceComparisonRelationIds: normalizedComparisonRelationIds,
+    ruleSetId: body.ruleSetId as string | undefined,
+    ruleSetVersion: body.ruleSetVersion as string | undefined,
+    modelId: body.modelId as string | undefined,
+    modelVersion: body.modelVersion as string | undefined,
+    modelProcessType:
+      body.modelProcessType as CreateEvidenceAssessmentInput["modelProcessType"],
+    modelProcessVersion: body.modelProcessVersion as string | undefined,
+    importReferenceType:
+      body.importReferenceType as CreateEvidenceAssessmentInput["importReferenceType"],
+    importReference: body.importReference as string | undefined,
     respondsToAssessmentId: body.respondsToAssessmentId as string | undefined,
     responseRelation:
       body.responseRelation as CreateEvidenceAssessmentInput["responseRelation"],
@@ -298,6 +426,14 @@ export function buildCreateEvidenceAssessmentController(
       if (error instanceof AssessmentGraphConflictError) {
         return res.status(409).json({
           error: "Assessment response graph conflict",
+          reason: error.reason,
+        });
+      }
+      if (error instanceof IndependenceComparisonError) {
+        return res.status(
+          error.reason === "not_found_or_wrong_version" ? 404 : 400,
+        ).json({
+          error: "Invalid independence comparison relations",
           reason: error.reason,
         });
       }

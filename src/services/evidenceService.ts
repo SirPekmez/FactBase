@@ -20,6 +20,26 @@ export const ASSESSMENT_METHODS = [
 ] as const;
 export type AssessmentMethod = (typeof ASSESSMENT_METHODS)[number];
 
+export const ASSESSMENT_RUBRIC_ID = "factbase-evidence-assessment" as const;
+export const ASSESSMENT_RUBRIC_VERSION = "1" as const;
+
+export const RECENCY_REFERENCE_TYPES = [
+  "current_state_at",
+  "event_at",
+  "period_ending_at",
+] as const;
+export type RecencyReferenceType =
+  (typeof RECENCY_REFERENCE_TYPES)[number];
+
+export const MODEL_PROCESS_TYPES = ["workflow", "prompt"] as const;
+export type ModelProcessType = (typeof MODEL_PROCESS_TYPES)[number];
+
+export const IMPORT_REFERENCE_TYPES = [
+  "import_run",
+  "external_record",
+] as const;
+export type ImportReferenceType = (typeof IMPORT_REFERENCE_TYPES)[number];
+
 export const ASSESSMENT_RESPONSE_RELATIONS = [
   "supports",
   "disputes",
@@ -52,6 +72,17 @@ export interface CreateEvidenceAssessmentInput {
   independence?: number;
   assessmentMethod: AssessmentMethod;
   rationale: string;
+  recencyReferenceType?: RecencyReferenceType;
+  recencyReferenceAt?: Date;
+  independenceComparisonRelationIds?: string[];
+  ruleSetId?: string;
+  ruleSetVersion?: string;
+  modelId?: string;
+  modelVersion?: string;
+  modelProcessType?: ModelProcessType;
+  modelProcessVersion?: string;
+  importReferenceType?: ImportReferenceType;
+  importReference?: string;
   respondsToAssessmentId?: string;
   responseRelation?: AssessmentResponseRelation;
   operationContext?: TrustedOperationContext;
@@ -59,6 +90,10 @@ export interface CreateEvidenceAssessmentInput {
 
 interface IdRow extends QueryResultRow {
   id: string;
+}
+
+interface ClaimVersionEvidenceRow extends IdRow {
+  claim_version_id: string;
 }
 
 interface AssessmentChainRow extends QueryResultRow {
@@ -102,6 +137,18 @@ interface AssessmentRow extends QueryResultRow {
   initiator_id: string | null;
   responds_to_assessment_id: string | null;
   response_relation: string | null;
+  rubric_id: string | null;
+  rubric_version: string | null;
+  recency_reference_type: string | null;
+  recency_reference_at: Date | null;
+  rule_set_id: string | null;
+  rule_set_version: string | null;
+  model_id: string | null;
+  model_version: string | null;
+  model_process_type: string | null;
+  model_process_version: string | null;
+  import_reference_type: string | null;
+  import_reference: string | null;
   assessed_at: Date;
 }
 
@@ -136,6 +183,23 @@ export class AssessmentResponseTargetNotFoundError extends Error {
       `Assessment ${assessmentId} was not found for evidence relation ${claimVersionEvidenceId}`,
     );
     this.name = "AssessmentResponseTargetNotFoundError";
+  }
+}
+
+export type IndependenceComparisonErrorReason =
+  | "self_comparison"
+  | "duplicate_comparison"
+  | "missing_comparison"
+  | "unexpected_comparison"
+  | "not_found_or_wrong_version";
+
+export class IndependenceComparisonError extends Error {
+  constructor(
+    public readonly reason: IndependenceComparisonErrorReason,
+    public readonly comparisonRelationIds: string[],
+  ) {
+    super(`Invalid independence comparison relations: ${reason}`);
+    this.name = "IndependenceComparisonError";
   }
 }
 
@@ -298,8 +362,8 @@ export async function createEvidenceAssessment(
     "Evidence assessment creation failed and the transaction could not be rolled back",
     async (client) => {
       await client.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
-      const relationResult = await client.query<IdRow>(
-        `SELECT cve.id
+      const relationResult = await client.query<ClaimVersionEvidenceRow>(
+        `SELECT cve.id, cve.claim_version_id
         FROM public.claim_version_evidence cve
         INNER JOIN public.claim_versions cv
           ON cv.id = cve.claim_version_id
@@ -318,6 +382,8 @@ export async function createEvidenceAssessment(
         );
       }
 
+      const assessmentId = randomUUID();
+
       if (input.respondsToAssessmentId) {
         const responseTargetResult = await client.query<IdRow>(
           `SELECT id
@@ -332,7 +398,6 @@ export async function createEvidenceAssessment(
           );
         }
 
-        const assessmentId = randomUUID();
         const chainResult = await client.query<AssessmentChainRow>(
             `WITH RECURSIVE ancestry AS (
               SELECT
@@ -369,16 +434,67 @@ export async function createEvidenceAssessment(
           throw new AssessmentGraphConflictError(conflictReason);
         }
 
-        return insertEvidenceAssessment(
-          client,
-          input,
-          relation.id,
-          assessmentId,
-        );
       }
 
-      const assessmentId = randomUUID();
-      return insertEvidenceAssessment(client, input, relation.id, assessmentId);
+      const comparisonRelationIds = (
+        input.independenceComparisonRelationIds ?? []
+      ).map((id) => id.toLowerCase());
+      if (new Set(comparisonRelationIds).size !== comparisonRelationIds.length) {
+        throw new IndependenceComparisonError(
+          "duplicate_comparison",
+          comparisonRelationIds,
+        );
+      }
+      comparisonRelationIds.sort();
+      if (input.independence !== undefined && comparisonRelationIds.length === 0) {
+        throw new IndependenceComparisonError(
+          "missing_comparison",
+          comparisonRelationIds,
+        );
+      }
+      if (input.independence === undefined && comparisonRelationIds.length > 0) {
+        throw new IndependenceComparisonError(
+          "unexpected_comparison",
+          comparisonRelationIds,
+        );
+      }
+      if (input.independence !== undefined) {
+        if (comparisonRelationIds.includes(relation.id)) {
+          throw new IndependenceComparisonError(
+            "self_comparison",
+            comparisonRelationIds,
+          );
+        }
+
+        const comparisonResult = await client.query<IdRow>(
+          `SELECT id
+          FROM public.claim_version_evidence
+          WHERE claim_version_id = $1
+            AND id = ANY($2::uuid[])
+          ORDER BY id`,
+          [relation.claim_version_id, comparisonRelationIds],
+        );
+        if (
+          comparisonResult.rows.length !== comparisonRelationIds.length ||
+          comparisonResult.rows.some(
+            (row, index) => row.id !== comparisonRelationIds[index],
+          )
+        ) {
+          throw new IndependenceComparisonError(
+            "not_found_or_wrong_version",
+            comparisonRelationIds,
+          );
+        }
+      }
+
+      return insertEvidenceAssessment(
+        client,
+        input,
+        relation.id,
+        relation.claim_version_id,
+        assessmentId,
+        comparisonRelationIds,
+      );
     },
   );
 }
@@ -387,7 +503,9 @@ async function insertEvidenceAssessment(
   client: PoolClient,
   input: CreateEvidenceAssessmentInput,
   relationId: string,
+  claimVersionId: string,
   assessmentId: string,
+  comparisonRelationIds: string[],
 ) {
   const initiator = input.operationContext?.initiator;
   const assessmentResult = await client.query<AssessmentRow>(
@@ -406,10 +524,23 @@ async function insertEvidenceAssessment(
       initiator_id,
       responds_to_assessment_id,
       response_relation,
+      rubric_id,
+      rubric_version,
+      recency_reference_type,
+      recency_reference_at,
+      rule_set_id,
+      rule_set_version,
+      model_id,
+      model_version,
+      model_process_type,
+      model_process_version,
+      import_reference_type,
+      import_reference,
       assessed_at
     ) VALUES (
       $1, $2, $3, $4, $5, $6, $7, $8, $9, NULL,
-      $10, $11, $12, $13, CURRENT_TIMESTAMP
+      $10, $11, $12, $13, $14, $15, $16, $17, $18,
+      $19, $20, $21, $22, $23, $24, $25, CURRENT_TIMESTAMP
     )
     RETURNING
       id,
@@ -426,6 +557,18 @@ async function insertEvidenceAssessment(
       initiator_id,
       responds_to_assessment_id,
       response_relation,
+      rubric_id,
+      rubric_version,
+      recency_reference_type,
+      recency_reference_at,
+      rule_set_id,
+      rule_set_version,
+      model_id,
+      model_version,
+      model_process_type,
+      model_process_version,
+      import_reference_type,
+      import_reference,
       assessed_at`,
     [
       assessmentId,
@@ -441,11 +584,38 @@ async function insertEvidenceAssessment(
       initiator?.id ?? null,
       input.respondsToAssessmentId ?? null,
       input.responseRelation ?? null,
+      ASSESSMENT_RUBRIC_ID,
+      ASSESSMENT_RUBRIC_VERSION,
+      input.recencyReferenceType ?? null,
+      input.recencyReferenceAt ?? null,
+      input.ruleSetId ?? null,
+      input.ruleSetVersion ?? null,
+      input.modelId ?? null,
+      input.modelVersion ?? null,
+      input.modelProcessType ?? null,
+      input.modelProcessVersion ?? null,
+      input.importReferenceType ?? null,
+      input.importReference ?? null,
     ],
   );
   const assessment = assessmentResult.rows[0];
   if (!assessment) {
     throw new Error("Evidence assessment insert returned no row");
+  }
+
+  if (comparisonRelationIds.length > 0) {
+    await client.query(
+      `INSERT INTO public.evidence_assessment_independence_comparisons (
+        assessment_id,
+        assessed_claim_version_evidence_id,
+        comparison_claim_version_evidence_id,
+        claim_version_id,
+        created_at
+      )
+      SELECT $1, $2, comparison_relation_id, $3, CURRENT_TIMESTAMP
+      FROM unnest($4::uuid[]) AS comparison_relation_id`,
+      [assessment.id, relationId, claimVersionId, comparisonRelationIds],
+    );
   }
 
   return {
@@ -461,6 +631,50 @@ async function insertEvidenceAssessment(
       recency: optionalNumber(assessment.recency),
       independence: optionalNumber(assessment.independence),
       assessmentMethod: assessment.assessment_method,
+      rubric: {
+        id: assessment.rubric_id,
+        version: assessment.rubric_version,
+      },
+      recencyContext:
+        assessment.recency_reference_type === null &&
+        assessment.recency_reference_at === null
+          ? null
+          : {
+              referenceType: assessment.recency_reference_type,
+              referenceAt: assessment.recency_reference_at,
+            },
+      independenceComparisonRelationIds: comparisonRelationIds,
+      method: {
+        type: assessment.assessment_method,
+        ruleSet:
+          assessment.rule_set_id === null &&
+          assessment.rule_set_version === null
+            ? null
+            : {
+                id: assessment.rule_set_id,
+                version: assessment.rule_set_version,
+              },
+        model:
+          assessment.model_id === null &&
+          assessment.model_version === null &&
+          assessment.model_process_type === null &&
+          assessment.model_process_version === null
+            ? null
+            : {
+                id: assessment.model_id,
+                version: assessment.model_version,
+                processType: assessment.model_process_type,
+                processVersion: assessment.model_process_version,
+              },
+        imported:
+          assessment.import_reference_type === null &&
+          assessment.import_reference === null
+            ? null
+            : {
+                referenceType: assessment.import_reference_type,
+                reference: assessment.import_reference,
+              },
+      },
       rationale: assessment.rationale,
       initiator:
         assessment.initiator_type === null

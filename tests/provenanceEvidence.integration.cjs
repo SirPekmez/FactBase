@@ -22,6 +22,11 @@ async function cleanup(pool, ids) {
     await client.query("BEGIN");
     if (ids.assessmentIds.length > 0) {
       await client.query(
+        `DELETE FROM public.evidence_assessment_independence_comparisons
+        WHERE assessment_id = ANY($1::uuid[])`,
+        [ids.assessmentIds],
+      );
+      await client.query(
         "DELETE FROM public.evidence_assessments WHERE id = ANY($1::uuid[])",
         [ids.assessmentIds],
       );
@@ -228,7 +233,10 @@ test("provenance, evidence, assessments and diff remain explicit and reproducibl
         relevance: 1,
         directness: 0.8,
         recency: 0.7,
+        recencyReferenceType: "event_at",
+        recencyReferenceAt: new Date("2026-08-21T10:00:00.000Z"),
         independence: 1,
+        independenceComparisonRelationIds: [addedEvidence.evidence.relationId],
         assessmentMethod: "manual",
         rationale: "Exact integration rationale: source is direct and independently documented.",
         operationContext: {

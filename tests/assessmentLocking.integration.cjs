@@ -39,6 +39,11 @@ async function cleanup(pool, ids) {
     await client.query("BEGIN");
     if (ids.assessmentIds.length > 0) {
       await client.query(
+        `DELETE FROM public.evidence_assessment_independence_comparisons
+        WHERE assessment_id = ANY($1::uuid[])`,
+        [ids.assessmentIds],
+      );
+      await client.query(
         "DELETE FROM public.evidence_assessments WHERE id = ANY($1::uuid[])",
         [ids.assessmentIds],
       );
@@ -154,8 +159,10 @@ test("assessment writes serialize per evidence relation without globally blockin
     await relationLockClient.query(
       `INSERT INTO public.evidence_assessments (
         id, claim_version_evidence_id, relevance, assessment_method,
-        rationale, responds_to_assessment_id, response_relation, assessed_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)`,
+        rationale, responds_to_assessment_id, response_relation,
+        rubric_id, rubric_version, assessed_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7,
+        'factbase-evidence-assessment', '1', CURRENT_TIMESTAMP)`,
       [
         committedParentId,
         evidence[0].relationId,
@@ -219,6 +226,8 @@ test("assessment writes serialize per evidence relation without globally blockin
         evidenceId: evidence[1].id,
         sourceQuality: 0.7,
         assessmentMethod: "rules_based",
+        ruleSetId: "rcv012-locking-rules",
+        ruleSetVersion: "1",
         rationale: "A different relation must remain independently writable.",
         respondsToAssessmentId: roots[1].id,
         responseRelation: "contextualizes",

@@ -8,6 +8,7 @@ const evidenceOneId = "44444444-4444-4444-8444-444444444444";
 const evidenceTwoId = "55555555-5555-4555-8555-555555555555";
 const evidenceThreeId = "66666666-6666-4666-8666-666666666666";
 const assessmentOneId = "77777777-7777-4777-8777-777777777777";
+const comparisonRelationId = "aaaaaaaa-1111-4111-8111-111111111111";
 
 function response() {
   return {
@@ -43,8 +44,6 @@ function assessmentBody(overrides = {}) {
     sourceQuality: 0.9,
     relevance: 1,
     directness: 0.8,
-    recency: 0.7,
-    independence: 1,
     assessmentMethod: "manual",
     rationale: "Exact rationale, including punctuation.",
     ...overrides,
@@ -279,9 +278,23 @@ test("assessment validation accepts boundary values, methods and response relati
   const cases = [
     assessmentBody({ sourceQuality: 0, relevance: undefined }),
     assessmentBody({ sourceQuality: 1 }),
-    assessmentBody({ assessmentMethod: "rules_based" }),
-    assessmentBody({ assessmentMethod: "model_assisted" }),
-    assessmentBody({ assessmentMethod: "imported" }),
+    assessmentBody({
+      assessmentMethod: "rules_based",
+      ruleSetId: "rules",
+      ruleSetVersion: "1",
+    }),
+    assessmentBody({
+      assessmentMethod: "model_assisted",
+      modelId: "model",
+      modelVersion: "1",
+      modelProcessType: "workflow",
+      modelProcessVersion: "1",
+    }),
+    assessmentBody({
+      assessmentMethod: "imported",
+      importReferenceType: "external_record",
+      importReference: "external:assessment:1",
+    }),
     ...["supports", "disputes", "contextualizes"].map((responseRelation) =>
       assessmentBody({
         respondsToAssessmentId: assessmentOneId,
@@ -302,6 +315,197 @@ test("assessment validation accepts boundary values, methods and response relati
       assert.equal(res.statusCode, 201);
     });
   }
+});
+
+test("RCV-014 validation enforces recency, independence, method provenance and server rubric ownership", async (t) => {
+  const {
+    buildCreateEvidenceAssessmentController,
+  } = require("../dist/controllers/evidenceController");
+  const invalid = [
+    assessmentBody({ recency: 0.5 }),
+    assessmentBody({
+      recencyReferenceType: "event_at",
+      recencyReferenceAt: "2026-08-21T09:00:00.000Z",
+    }),
+    assessmentBody({
+      recency: 0.5,
+      recencyReferenceType: "latest",
+      recencyReferenceAt: "2026-08-21T09:00:00.000Z",
+    }),
+    assessmentBody({ independence: 0.5 }),
+    assessmentBody({ independenceComparisonRelationIds: [comparisonRelationId] }),
+    assessmentBody({
+      independence: 0.5,
+      independenceComparisonRelationIds: [],
+    }),
+    assessmentBody({
+      independence: 0.5,
+      independenceComparisonRelationIds: [comparisonRelationId, comparisonRelationId],
+    }),
+    assessmentBody({ assessmentMethod: "rules_based" }),
+    assessmentBody({
+      assessmentMethod: "model_assisted",
+      modelId: "model",
+      modelVersion: "1",
+      modelProcessType: "workflow",
+    }),
+    assessmentBody({ assessmentMethod: "imported" }),
+    assessmentBody({ ruleSetId: "rules", ruleSetVersion: "1" }),
+    assessmentBody({ rubricId: "factbase-evidence-assessment" }),
+    assessmentBody({ rubricVersion: "1" }),
+  ];
+
+  for (const body of invalid) {
+    await t.test(JSON.stringify(body), async () => {
+      let called = false;
+      const handler = buildCreateEvidenceAssessmentController(async () => {
+        called = true;
+      });
+      const res = response();
+      await handler(
+        {
+          params: { claimId, versionId: versionOneId, evidenceId: evidenceOneId },
+          body,
+        },
+        res,
+      );
+      assert.equal(res.statusCode, 400);
+      assert.equal(called, false);
+    });
+  }
+});
+
+test("RCV-014 validation accepts calibrated values and complete contexts", async (t) => {
+  const {
+    buildCreateEvidenceAssessmentController,
+  } = require("../dist/controllers/evidenceController");
+  const cases = [0, 0.25, 0.5, 0.75, 1].flatMap((value) => [
+    assessmentBody({ sourceQuality: value }),
+    assessmentBody({ relevance: value }),
+    assessmentBody({ directness: value }),
+    assessmentBody({
+      recency: value,
+      recencyReferenceType: "current_state_at",
+      recencyReferenceAt: "2026-08-21T09:00:00.000Z",
+    }),
+    assessmentBody({
+      independence: value,
+      independenceComparisonRelationIds: [comparisonRelationId],
+    }),
+  ]);
+
+  for (const body of cases) {
+    await t.test(JSON.stringify(body), async () => {
+      let received;
+      const handler = buildCreateEvidenceAssessmentController(async (input) => {
+        received = input;
+        return { ok: true };
+      });
+      const res = response();
+      await handler(
+        {
+          params: { claimId, versionId: versionOneId, evidenceId: evidenceOneId },
+          body,
+        },
+        res,
+      );
+      assert.equal(res.statusCode, 201);
+      if (body.recencyReferenceAt) {
+        assert.equal(received.recencyReferenceAt.toISOString(), body.recencyReferenceAt);
+      }
+    });
+  }
+});
+
+test("RCV-014 comparator UUIDs are canonicalized before duplicate checks", async (t) => {
+  const {
+    buildCreateEvidenceAssessmentController,
+  } = require("../dist/controllers/evidenceController");
+  const mixedCaseComparisonId = comparisonRelationId
+    .split("")
+    .map((character, index) =>
+      index % 2 === 0 ? character.toUpperCase() : character,
+    )
+    .join("");
+
+  for (const suppliedId of [
+    comparisonRelationId,
+    comparisonRelationId.toUpperCase(),
+    mixedCaseComparisonId,
+  ]) {
+    await t.test(suppliedId, async () => {
+      let received;
+      const handler = buildCreateEvidenceAssessmentController(async (input) => {
+        received = input;
+        return { ok: true };
+      });
+      const res = response();
+      await handler(
+        {
+          params: { claimId, versionId: versionOneId, evidenceId: evidenceOneId },
+          body: assessmentBody({
+            independence: 0.5,
+            independenceComparisonRelationIds: [suppliedId],
+          }),
+        },
+        res,
+      );
+      assert.equal(res.statusCode, 201);
+      assert.deepEqual(received.independenceComparisonRelationIds, [
+        comparisonRelationId,
+      ]);
+    });
+  }
+
+  await t.test("case-varied duplicate", async () => {
+    let called = false;
+    const handler = buildCreateEvidenceAssessmentController(async () => {
+      called = true;
+    });
+    const res = response();
+    await handler(
+      {
+        params: { claimId, versionId: versionOneId, evidenceId: evidenceOneId },
+        body: assessmentBody({
+          independence: 0.5,
+          independenceComparisonRelationIds: [
+            comparisonRelationId,
+            comparisonRelationId.toUpperCase(),
+          ],
+        }),
+      },
+      res,
+    );
+    assert.equal(res.statusCode, 400);
+    assert.equal(called, false);
+  });
+
+  await t.test("case-varied self comparator maps to 400", async () => {
+    const {
+      IndependenceComparisonError,
+    } = require("../dist/services/evidenceService");
+    const selfRelationId = "abcdefab-cdef-4abc-8def-abcdefabcdef";
+    const handler = buildCreateEvidenceAssessmentController(async (input) => {
+      assert.deepEqual(input.independenceComparisonRelationIds, [selfRelationId]);
+      throw new IndependenceComparisonError("self_comparison", [selfRelationId]);
+    });
+    const res = response();
+    await handler(
+      {
+        params: { claimId, versionId: versionOneId, evidenceId: evidenceOneId },
+        body: assessmentBody({
+          independence: 0.5,
+          independenceComparisonRelationIds: [selfRelationId.toUpperCase()],
+        }),
+      },
+      res,
+    );
+    assert.equal(res.statusCode, 400);
+    assert.deepEqual(res.body, {
+      error: "Invalid independence comparison relations",
+      reason: "self_comparison",
+    });
+  });
 });
 
 test("assessment controller preserves rationale exactly and maps missing relation to 404", async () => {
@@ -469,11 +673,17 @@ function writeStage(sql) {
     return "LOCK RELATION";
   }
   if (sql.includes("WITH RECURSIVE ancestry")) return "CHECK RESPONSE CHAIN";
+  if (sql.includes("FROM public.claim_version_evidence") && sql.includes("ANY($2::uuid[])")) {
+    return "VERIFY COMPARISONS";
+  }
   if (sql.includes("FROM public.evidence_assessments") && sql.includes("WHERE id")) {
     return "VERIFY RESPONSE TARGET";
   }
   if (sql.includes("INSERT INTO public.evidence_assessments")) {
     return "INSERT ASSESSMENT";
+  }
+  if (sql.includes("INSERT INTO public.evidence_assessment_independence_comparisons")) {
+    return "INSERT COMPARISONS";
   }
   throw new Error(`Unexpected write query: ${sql}`);
 }
@@ -483,6 +693,7 @@ function writeHarness({
   emptyRows = [],
   versionExists = true,
   relationExists = true,
+  lockedRelationId = assessmentOneId,
   responseTargetExists = true,
   chainRows,
 } = {}) {
@@ -515,7 +726,14 @@ function writeHarness({
         return { rows: [{ id: values[0], claim_version_id: values[1], evidence_id: values[2], relation: values[3], created_at: now }] };
       }
       if (stage === "LOCK RELATION") {
-        return { rows: relationExists ? [{ id: assessmentOneId }] : [] };
+        return {
+          rows: relationExists
+            ? [{ id: lockedRelationId, claim_version_id: versionOneId }]
+            : [],
+        };
+      }
+      if (stage === "VERIFY COMPARISONS") {
+        return { rows: values[1].map((id) => ({ id })).sort((a, b) => a.id.localeCompare(b.id)) };
       }
       if (stage === "VERIFY RESPONSE TARGET") {
         return { rows: responseTargetExists ? [{ id: values[0] }] : [] };
@@ -535,6 +753,12 @@ function writeHarness({
           rationale: values[8], assessed_by: null,
           initiator_type: values[9], initiator_id: values[10],
           responds_to_assessment_id: values[11], response_relation: values[12],
+          rubric_id: values[13], rubric_version: values[14],
+          recency_reference_type: values[15], recency_reference_at: values[16],
+          rule_set_id: values[17], rule_set_version: values[18],
+          model_id: values[19], model_version: values[20],
+          model_process_type: values[21], model_process_version: values[22],
+          import_reference_type: values[23], import_reference: values[24],
           assessed_at: now,
         }] };
       }
@@ -622,6 +846,123 @@ test("assessment is append-inserted with exact dimensions and rationale", async 
   assert.equal(result.assessment.rationale, input.rationale);
   assert.equal(result.assessment.initiator, null);
   assert.equal(result.assessment.legacyAssessedBy, null);
+  assert.deepEqual(result.assessment.rubric, {
+    id: "factbase-evidence-assessment",
+    version: "1",
+  });
+});
+
+test("RCV-014 assessment stores recency and same-version independence context atomically", async () => {
+  const { createEvidenceAssessment } = require("../dist/services/evidenceService");
+  const harness = writeHarness();
+  const referenceAt = new Date("2026-08-21T09:00:00.000Z");
+  const result = await createEvidenceAssessment(
+    {
+      claimId,
+      versionId: versionOneId,
+      evidenceId: evidenceOneId,
+      relevance: 0.75,
+      recency: 0.5,
+      recencyReferenceType: "event_at",
+      recencyReferenceAt: referenceAt,
+      independence: 1,
+      independenceComparisonRelationIds: [comparisonRelationId],
+      assessmentMethod: "rules_based",
+      ruleSetId: "factbase-rules",
+      ruleSetVersion: "2",
+      rationale: "Every populated RCV-014 dimension is explicitly justified.",
+    },
+    harness.pool,
+  );
+
+  assert.deepEqual(harness.calls.map((call) => call.stage), [
+    "BEGIN",
+    "SET READ COMMITTED",
+    "LOCK RELATION",
+    "VERIFY COMPARISONS",
+    "INSERT ASSESSMENT",
+    "INSERT COMPARISONS",
+    "COMMIT",
+  ]);
+  assert.deepEqual(result.assessment.recencyContext, {
+    referenceType: "event_at",
+    referenceAt,
+  });
+  assert.deepEqual(result.assessment.independenceComparisonRelationIds, [
+    comparisonRelationId,
+  ]);
+  assert.deepEqual(result.assessment.method.ruleSet, {
+    id: "factbase-rules",
+    version: "2",
+  });
+});
+
+test("RCV-014 comparison insert failure rolls back the assessment atomically", async () => {
+  const { createEvidenceAssessment } = require("../dist/services/evidenceService");
+  const comparisonError = new Error("comparison insert failed");
+  const harness = writeHarness({
+    failures: { "INSERT COMPARISONS": comparisonError },
+  });
+
+  await assert.rejects(
+    createEvidenceAssessment(
+      {
+        claimId,
+        versionId: versionOneId,
+        evidenceId: evidenceOneId,
+        independence: 0.5,
+        independenceComparisonRelationIds: [comparisonRelationId],
+        assessmentMethod: "manual",
+        rationale: "The assessment and comparison set must commit together.",
+      },
+      harness.pool,
+    ),
+    comparisonError,
+  );
+
+  assert.deepEqual(harness.calls.map((call) => call.stage), [
+    "BEGIN",
+    "SET READ COMMITTED",
+    "LOCK RELATION",
+    "VERIFY COMPARISONS",
+    "INSERT ASSESSMENT",
+    "INSERT COMPARISONS",
+    "ROLLBACK",
+  ]);
+  assert.deepEqual(harness.releases, [[]]);
+});
+
+test("RCV-014 service detects a differently-cased self comparator", async () => {
+  const {
+    IndependenceComparisonError,
+    createEvidenceAssessment,
+  } = require("../dist/services/evidenceService");
+  const selfRelationId = "abcdefab-cdef-4abc-8def-abcdefabcdef";
+  const harness = writeHarness({ lockedRelationId: selfRelationId });
+
+  await assert.rejects(
+    createEvidenceAssessment(
+      {
+        claimId,
+        versionId: versionOneId,
+        evidenceId: evidenceOneId,
+        independence: 0.5,
+        independenceComparisonRelationIds: [selfRelationId.toUpperCase()],
+        assessmentMethod: "manual",
+        rationale: "Self comparison is independent of UUID letter casing.",
+      },
+      harness.pool,
+    ),
+    (error) =>
+      error instanceof IndependenceComparisonError &&
+      error.reason === "self_comparison",
+  );
+  assert.deepEqual(harness.calls.map((call) => call.stage), [
+    "BEGIN",
+    "SET READ COMMITTED",
+    "LOCK RELATION",
+    "ROLLBACK",
+  ]);
 });
 
 test("assessment response is inserted against the verified same evidence relation", async () => {
@@ -938,12 +1279,16 @@ function readHarness(options = {}) {
         id: "b2222222-2222-4222-8222-222222222222",
         relation_id: "a3333333-3333-4333-8333-333333333333",
         source_quality: "0.5", relevance: "1", directness: "0.6", recency: "0.7",
-        independence: "1", assessment_method: "manual", rationale: "Reassessed",
+        independence: "1", assessment_method: "rules_based", rationale: "Reassessed",
         assessed_by: null, initiator_type: "human", initiator_id: "verified-reviewer",
         responds_to_assessment_id: "b2000000-0000-4000-8000-000000000000",
         response_relation: "disputes",
         parent_assessment_id: "b2000000-0000-4000-8000-000000000000",
         parent_relation_id: "a3333333-3333-4333-8333-333333333333",
+        rubric_id: "factbase-evidence-assessment", rubric_version: "1",
+        recency_reference_type: "event_at",
+        recency_reference_at: new Date("2026-08-21T05:00:00.000Z"),
+        rule_set_id: "read-rules", rule_set_version: "4",
         assessed_at: new Date("2026-08-21T06:04:00.000Z"),
       },
     ]],
@@ -951,6 +1296,20 @@ function readHarness(options = {}) {
   if (options.versionTwoAssessments) {
     assessments.set(versionTwoId, options.versionTwoAssessments);
   }
+  const assessmentDefaults = {
+    rubric_id: null,
+    rubric_version: null,
+    recency_reference_type: null,
+    recency_reference_at: null,
+    rule_set_id: null,
+    rule_set_version: null,
+    model_id: null,
+    model_version: null,
+    model_process_type: null,
+    model_process_version: null,
+    import_reference_type: null,
+    import_reference: null,
+  };
   let activeVersionId;
   const client = {
     async query(sql, values) {
@@ -965,8 +1324,23 @@ function readHarness(options = {}) {
       if (sql.includes("FROM public.claim_version_evidence cve") && sql.includes("INNER JOIN public.evidence e")) {
         return { rows: evidence.get(activeVersionId) ?? [] };
       }
+      if (sql.includes("FROM public.evidence_assessment_independence_comparisons")) {
+        const defaultComparisons = activeVersionId === versionTwoId
+          ? [{
+              assessment_id: "b2222222-2222-4222-8222-222222222222",
+              comparison_claim_version_evidence_id:
+                "a4444444-4444-4444-8444-444444444444",
+            }]
+          : [];
+        return { rows: options.comparisons?.get(activeVersionId) ?? defaultComparisons };
+      }
       if (sql.includes("FROM public.evidence_assessments")) {
-        return { rows: assessments.get(activeVersionId) ?? [] };
+        return {
+          rows: (assessments.get(activeVersionId) ?? []).map((row) => ({
+            ...assessmentDefaults,
+            ...row,
+          })),
+        };
       }
       throw new Error(`Unexpected read query: ${sql}`);
     },
@@ -997,6 +1371,21 @@ test("read model joins explicit provenance, evidence and assessments", async () 
     assessmentId: "b2000000-0000-4000-8000-000000000000",
     relation: "disputes",
   });
+  assert.deepEqual(response.rubric, {
+    id: "factbase-evidence-assessment",
+    version: "1",
+  });
+  assert.deepEqual(response.recencyContext, {
+    referenceType: "event_at",
+    referenceAt: new Date("2026-08-21T05:00:00.000Z"),
+  });
+  assert.deepEqual(response.independenceComparisonRelationIds, [
+    "a4444444-4444-4444-8444-444444444444",
+  ]);
+  assert.deepEqual(response.method.ruleSet, {
+    id: "read-rules",
+    version: "4",
+  });
   assert.deepEqual(result.evidence[0].assessmentGraph, {
     unparentedAssessmentIds: ["b2000000-0000-4000-8000-000000000000"],
     integrity: { status: "valid", anomalies: [] },
@@ -1007,6 +1396,7 @@ test("read model joins explicit provenance, evidence and assessments", async () 
     "legacy-reviewer",
   );
   assert.equal(legacy.evidence[0].assessments[0].initiator, null);
+  assert.equal(legacy.evidence[0].assessments[0].rubric, null);
   assert.deepEqual(harness.releases, [[]]);
 });
 
