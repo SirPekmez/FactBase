@@ -25,6 +25,7 @@
   },
   "homepage": "https://github.com/SirPekmez/FactBase#readme",
   "dependencies": {
+    "canonicalize": "2.1.0",
     "express": "^5.2.1",
     "pg": "^8.23.0"
   },
