@@ -233,6 +233,54 @@ function validateOrderedArray(
   return array;
 }
 
+function compareAscii(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function statementOrderingKey(
+  value: unknown,
+  family: typeof STATEMENT_ARRAYS[number],
+): readonly string[] {
+  const statement = value as Record<string, string>;
+  if (family === "artifactProvenanceStatements") {
+    return [statement.subjectArtifactVersionId, statement.relationship, statement.objectArtifactVersionId, statement.statementId];
+  }
+  if (family === "sourceRelationshipStatements") {
+    return [statement.subjectSourceId, statement.relationship, statement.objectSourceId, statement.statementId];
+  }
+  if (family === "artifactSourceAttributions") {
+    return [statement.subjectArtifactVersionId, statement.relationship, statement.objectSourceVersionId, statement.statementId];
+  }
+  if (family === "evidenceArtifactBindings") {
+    return [statement.subjectEvidenceId, statement.relationship, statement.objectArtifactVersionId, statement.statementId];
+  }
+  return [statement.statementId];
+}
+
+function validateOrderedStatementArray(
+  value: unknown,
+  family: typeof STATEMENT_ARRAYS[number],
+  path: string,
+): unknown[] {
+  const array = expectRcv016Array(value, path);
+  const statementIds = array.map((entry, index) => validateStatement(entry, family, `${path}[${index}]`));
+  if (new Set(statementIds).size !== statementIds.length) {
+    throw new Rcv016ValidationError(path, "duplicate statementId");
+  }
+  for (let index = 1; index < array.length; index += 1) {
+    const left = statementOrderingKey(array[index - 1], family);
+    const right = statementOrderingKey(array[index], family);
+    let comparison = 0;
+    for (let part = 0; part < left.length && comparison === 0; part += 1) {
+      comparison = compareAscii(left[part], right[part]);
+    }
+    if (comparison >= 0) {
+      throw new Rcv016ValidationError(path, "expected frozen canonical statement tuple order");
+    }
+  }
+  return array;
+}
+
 function validateSnapshot(value: unknown): Rcv016ProvenanceSnapshotCanonicalV1 {
   const snapshot = expectRcv016ExactObject(value, RCV016_SNAPSHOT_CANONICAL_INCLUDED_FIELDS_V1, "snapshotCanonical");
   if (snapshot.snapshotSchemaId !== RCV016_SNAPSHOT_SCHEMA_ID || snapshot.snapshotSchemaVersion !== RCV016_SNAPSHOT_SCHEMA_VERSION) throw new Rcv016UnsupportedContractVersionError("snapshotCanonical", "unsupported Snapshot identity");
@@ -250,7 +298,7 @@ function validateSnapshot(value: unknown): Rcv016ProvenanceSnapshotCanonicalV1 {
   assertSortedUnique(roots, "snapshotCanonical.rootArtifactVersionIds");
   validateOrderedArray(snapshot.artifactVersions, "snapshotCanonical.artifactVersions", validateArtifactVersion);
   validateOrderedArray(snapshot.sourceVersions, "snapshotCanonical.sourceVersions", validateSourceVersion);
-  for (const family of STATEMENT_ARRAYS) validateOrderedArray(snapshot[family], `snapshotCanonical.${family}`, (entry, path) => validateStatement(entry, family, path));
+  for (const family of STATEMENT_ARRAYS) validateOrderedStatementArray(snapshot[family], family, `snapshotCanonical.${family}`);
   const membershipKeys = expectRcv016Array(snapshot.membershipKeys, "snapshotCanonical.membershipKeys");
   try {
     const orderedMembershipKeys = sortRcv016SnapshotMembershipKeys(membershipKeys);

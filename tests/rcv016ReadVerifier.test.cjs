@@ -74,8 +74,9 @@ function fixture() {
     { artifactVersionId: id(2), artifactId: id(1002), versionNumber: 1, captureSchemaId: "factbase-artifact-version-capture", captureSchemaVersion: "1", captureCanonical: captureB.canonical, captureHash: captureB.hash, createdAt: TS },
   ];
   const artifactProvenanceStatements = [
-    { family: "ArtifactProvenanceStatement", ...common(id(101)), subjectArtifactVersionId: id(1), relationship: "cites", objectArtifactVersionId: id(2) },
-    { family: "ArtifactProvenanceStatement", ...common(id(102)), subjectArtifactVersionId: id(2), relationship: "quotes", objectArtifactVersionId: id(1) },
+    { family: "ArtifactProvenanceStatement", ...common(id(102)), subjectArtifactVersionId: id(1), relationship: "cites", objectArtifactVersionId: id(2) },
+    { family: "ArtifactProvenanceStatement", ...common(id(103)), subjectArtifactVersionId: id(1), relationship: "quotes", objectArtifactVersionId: id(2) },
+    { family: "ArtifactProvenanceStatement", ...common(id(101)), subjectArtifactVersionId: id(2), relationship: "quotes", objectArtifactVersionId: id(1) },
   ];
   const sourceRelationshipStatements = [{ family: "SourceRelationshipStatement", ...common(id(301)), subjectSourceId: id(2001), relationship: "part_of", objectSourceId: id(2002) }];
   const artifactSourceAttributions = [
@@ -150,6 +151,51 @@ test("valid exact historical read verifies without rewriting and ignores SQL row
   assert.equal(JSON.stringify(raw), before);
   assert.ok(raw.header.snapshotCanonical.includes("\\u0000"));
   assert.ok(raw.header.snapshotCanonical.includes("\\\\u0000"));
+});
+
+test("Contract tuple ordering accepts authenticated Builder output with non-monotonic statement IDs", async () => {
+  const { raw, result } = fixture();
+  const canonicalBeforeVerification = result.canonical;
+  const hashBeforeVerification = result.hash;
+  assert.deepEqual(
+    result.snapshot.artifactProvenanceStatements.map((statement) => statement.statementId),
+    [id(102), id(103), id(101)],
+  );
+  assert.equal((await verifyRcv016HistoricalSnapshot(SNAPSHOT_ID, repository(raw))).verified, true);
+  assert.equal(raw.header.snapshotCanonical, canonicalBeforeVerification);
+  assert.equal(raw.header.snapshotHash, hashBeforeVerification);
+});
+
+test("statement-backed arrays reject malformed Contract tuple ordering and duplicate identities", async () => {
+  async function rejectArtifactOrder(mutate, expectedMessage = "expected frozen canonical statement tuple order") {
+    const raw = clone(fixture().raw);
+    const snapshot = JSON.parse(raw.header.snapshotCanonical);
+    mutate(snapshot.artifactProvenanceStatements);
+    setSnapshot(raw, snapshot);
+    await assert.rejects(
+      () => verifyRcv016HistoricalSnapshot(SNAPSHOT_ID, repository(raw)),
+      (error) => error.code === "closed_schema_violation" && error.cause?.message.includes(expectedMessage),
+    );
+  }
+
+  await rejectArtifactOrder((statements) => statements.reverse());
+  await rejectArtifactOrder((statements) => {
+    [statements[0], statements[1]] = [statements[1], statements[0]];
+  });
+  await rejectArtifactOrder((statements) => {
+    statements[0].relationship = "quotes";
+    statements[0].objectArtifactVersionId = id(2);
+    statements[1].relationship = "quotes";
+    statements[1].objectArtifactVersionId = id(1);
+  });
+  await rejectArtifactOrder((statements) => {
+    statements[0].relationship = "quotes";
+    statements[1].relationship = "quotes";
+    [statements[0], statements[1]] = [statements[1], statements[0]];
+  });
+  await rejectArtifactOrder((statements) => {
+    statements[2].statementId = statements[0].statementId;
+  }, "duplicate statementId");
 });
 
 test("exact lookup, hash, RFC-8785/JCS, and version gates fail closed", async () => {
@@ -294,7 +340,7 @@ test("historical multiplicity is preserved and later rows from all live families
   const verified = await verifyRcv016HistoricalSnapshot(SNAPSHOT_ID, repository(raw));
   assert.equal(verified.verified, true);
   assert.equal(raw.header.snapshotCanonical, before);
-  assert.equal(result.snapshot.artifactProvenanceStatements.length, 2);
+  assert.equal(result.snapshot.artifactProvenanceStatements.length, 3);
   assert.equal(result.snapshot.artifactSourceAttributions.length, 2);
   assert.equal(result.snapshot.knowledgeStateStatements.length, 1);
 });
