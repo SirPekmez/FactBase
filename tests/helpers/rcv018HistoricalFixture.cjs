@@ -98,6 +98,9 @@ async function insertFixturePhase(client, labels) {
 async function insertFixtureRoots(client, fixture = {}) {
   const limits = payloadLimits();
   const ts = TS;
+  // Fixture-only: preserve the frozen historical timestamp instead of the
+  // migration trigger's transaction_timestamp() projection.
+  await client.query("SET LOCAL session_replication_role = 'replica'");
   await insert(client, 'INSERT INTO claims (id) VALUES ($1)', [IDS.claim]);
   await insert(client, 'INSERT INTO claim_versions (id,claim_id,version_number,title,normalized_statement,language,claim_type,status,publication_status,change_reason,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', [IDS.claimVersion, IDS.claim, 1, 'RCV018 fixture claim', 'Fixture statement', 'en', 'fact', 'draft', 'unpublished', 'fixture', ts]);
   await insert(client, 'INSERT INTO provenance_payload_limits (limits_id,limits_version,schema_id,schema_version,source_metadata_canonical_bytes,source_locator_count,display_name_codepoints,display_name_utf8_bytes,locator_string_codepoints,locator_string_utf8_bytes,artifact_capture_canonical_bytes,artifact_locator_codepoints,artifact_locator_utf8_bytes,media_type_codepoints,media_type_utf8_bytes,title_codepoints,title_utf8_bytes,rationale_codepoints,rationale_utf8_bytes,foundation_canonical_bytes,foundation_item_count,foundation_input_reference_count,foundation_reference_codepoints,foundation_reference_utf8_bytes,definition_canonical,definition_hash,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)', [limits.limitsId, limits.limitsVersion, 'factbase-provenance-payload-limits', '1', 10000,10000,10000,10000,10000,10000,10000,10000,10000,10000,10000,10000,10000,10000,10000,10000,10000,10000,10000,10000, limits.definitionCanonical, limits.definitionHash, ts]);
