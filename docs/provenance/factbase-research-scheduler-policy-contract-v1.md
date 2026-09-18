@@ -184,6 +184,22 @@ If slot `n` already has a decision, the existing immutable decision is the
 idempotent result before any current policy evaluation; it MUST NOT be
 replaced by a later policy version or reclassified by current policy state.
 
+Persisted SchedulerDecisions in one policy stream also form one immutable
+predecessor chain. A chain genesis has both `previousDecisionIdentity` and
+`previousDecisionCanonicalHash` equal to explicit canonical `null`. Every
+non-genesis decision MUST reference the immediately preceding decision in the
+same policy stream and its independently reconstructed canonical SHA-256 hash.
+There MUST be exactly one genesis for a non-empty stream, at most one
+successor for any predecessor, and no cycle, forward reference, disconnected
+node, or missing predecessor. The complete chain MUST cover every persisted
+decision in the stream exactly once. Along the authenticated chain, each
+successor `slot_index` MUST be strictly greater than its predecessor's.
+
+This is logical Scheduler authority order only. It is not PostgreSQL physical
+insertion order, transaction-ID order, commit-timestamp order, wall-clock
+order, `evaluationAt` order, or `scheduledAt` order. A decreasing or equal
+slot index on a chain edge fails closed as retroactive or conflicting history.
+
 ## 10. SchedulerDecision authority
 
 The Scheduler distinguishes a transient Scheduler evaluation result from a
@@ -215,9 +231,18 @@ SchedulerDecision authority:
 - `nextEligibleAt`;
 - immutable Operation lifecycle-prefix identity and hash;
 - conditional immutable nonterminal-Run evidence; and
-- conditional emitted `RUN_NOW` request/binding authority.
+- conditional emitted `RUN_NOW` request/binding authority;
+- `previousDecisionIdentity`; and
+- `previousDecisionCanonicalHash`.
 
 The canonical field set MUST contain no mutable or current-state field.
+
+`previousDecisionIdentity` is the exact SchedulerDecision identity tuple
+`(operation_id, policy_id, slot_index)`. Both predecessor fields are always
+present canonically. They are both `null` for genesis and both non-null for a
+non-genesis decision. A predecessor hash MUST match the independently
+reconstructed canonical bytes of that predecessor. A predecessor never stores
+successor information, so this dependency is acyclic.
 
 `SCHEDULE_LATER / NOT_YET_ELIGIBLE` is evaluation-only. It has no
 SchedulerDecision identity, no slot identity, consumes no slot, and has no
@@ -518,6 +543,13 @@ The identity rules are:
 - same identity and divergent immutable canonical authority: fail closed; and
 - different identities: distinct historical authority.
 
+The same policy stream has one authenticated predecessor chain: no second
+genesis, branch, disconnected append, or retroactive lower/equal-slot
+successor is valid. Concurrent new decisions MUST append after the currently
+authenticated logical tail; the Contract does not prescribe the physical
+locking mechanism. The current tail is always derived from immutable chain
+history and is never a mutable Scheduler authority.
+
 Independent authenticated Operator requests remain distinct RCV-021 history.
 Equal content MUST NOT collapse distinct scheduler slots, Runs, or other
 historical authority.
@@ -557,7 +589,11 @@ An independent Scheduler ReadVerifier must reconstruct and verify:
 - historical Operation state;
 - the historical active-Run prefix when applicable;
 - decision, reason, and `nextEligibleAt`; and
-- the `RUN_NOW` request binding where applicable.
+- the `RUN_NOW` request binding where applicable; and
+- the complete policy-stream predecessor chain, including exactly one genesis
+  for a non-empty stream, predecessor identity and hash, same-stream
+  membership, branch and cycle absence, complete coverage, and strict
+  slot-index increase.
 
 The verifier MUST reconstruct authority from persisted history rather than
 trusting Writer output, current policy pointers, queue state, current Run
@@ -572,7 +608,11 @@ current policy or Run state, rewrite timestamps, or recompute history into
 stored state.
 
 Invalid, malformed, conflicting, unsupported, or lineage-invalid authority
-fails closed. Correction creates new authority.
+fails closed. Missing predecessors, predecessor identity/hash mismatches,
+second genesis, branches, cycles, disconnected nodes, same-stream violations,
+and non-increasing chain slot indexes are lineage-invalid authority. Correction
+creates new authority; no predecessor reference, hash, chain connection, or
+historical decision is repaired or rewritten.
 
 ## 27. Secret boundary
 
@@ -624,13 +664,17 @@ Canonical representations MUST define explicit null and absence semantics,
 must not depend on database row order, runtime collection order, locale, or
 current mutable state, and must preserve exact decimal integer and UTC
 microsecond values. Any canonical collection has one explicit deterministic
-ordering rule appropriate to its semantic set or sequence meaning.
+ordering rule appropriate to its semantic set or sequence meaning. For a
+non-genesis SchedulerDecision, canonical authority may depend on the prior
+decision identity and canonical hash; the prior decision MUST NOT depend on
+the successor. RUN_NOW binding canonical authority MUST NOT introduce a
+reverse Decision-hash dependency.
 
 ## 31. Determinism
 
 Given identical persisted policy version, Operation authority, slot identity,
-historical Run prefix, and supplied evaluation timestamp, the Scheduler MUST
-produce identical:
+authenticated policy-stream predecessor chain, historical Run prefix, and
+supplied evaluation timestamp, the Scheduler MUST produce identical:
 
 - decision;
 - reason;
