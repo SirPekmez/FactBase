@@ -30,6 +30,15 @@ test("repository uses one parameterized transaction and exact immutable fields",
   assert.equal(client.sql[0].text, "BEGIN"); const insert = client.sql.find((entry) => /INSERT INTO public\.research_provider_results/.test(entry.text)); assert.ok(insert); assert.ok(insert.text.includes("$1")); assert.equal(client.sql.at(-1).text, "COMMIT");
 });
 
+test("transaction-neutral primitive uses caller transaction without owning it", async () => {
+  const client = new FakeClient();
+  let released = 0; client.release = () => { released += 1; };
+  const authenticated = verifier.verifyRcv021Write({ providerResults: [result()] });
+  await repo.persistRcv021BundleWithinTransaction(client, authenticated);
+  assert.equal(client.sql.some((entry) => /^(BEGIN|COMMIT|ROLLBACK)$/.test(entry.text)), false);
+  assert.equal(released, 0);
+});
+
 test("repository rolls back on mutation failure and never reports success", async () => {
   const client = new FakeClient("research_provider_results"); await assert.rejects(() => repo.persistRcv021Bundle(client, { providerResults: [result()] }), /injected failure/); assert.equal(client.sql.at(-1).text, "ROLLBACK");
 });
