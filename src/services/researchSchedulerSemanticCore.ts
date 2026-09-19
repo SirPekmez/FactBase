@@ -161,12 +161,13 @@ export function evaluateScheduler(input: SchedulerEvaluationInput): SchedulerEva
     nextEligibleAtMicros: nextEligibleAtMicros === null ? null : canonicalSchedulerMicros(nextEligibleAtMicros),
     dueSlot: null,
   });
-  if (input.operationState === "CLOSED") return transient("NO_ACTION", "OPERATION_CLOSED", null);
   if (due === null) {
+    if (input.operationState === "CLOSED") return transient("NO_ACTION", "OPERATION_CLOSED", null);
     const owner = selectSchedulerPolicyOwner(history, anchor.firstEligibilityAtBigInt);
     return owner.enabled ? transient("SCHEDULE_LATER", "NOT_YET_ELIGIBLE", anchor.firstEligibilityAtBigInt) : transient("NO_ACTION", "POLICY_DISABLED", null);
   }
   const owner = selectSchedulerPolicyOwner(history, due.scheduledAtMicros);
+  if (input.operationState === "CLOSED") return Object.freeze({ kind: "DUE_EVALUATION", evaluationAtMicros: canonicalSchedulerMicros(evaluation), slotIndex: due.slotIndex.toString(10), scheduledAtMicros: canonicalSchedulerMicros(due.scheduledAtMicros), nextEligibleAtMicros: null, decision: "NO_ACTION", reason: "OPERATION_CLOSED", owningPolicyVersion: owner });
   if (!owner.enabled) return Object.freeze({ kind: "DUE_EVALUATION", evaluationAtMicros: canonicalSchedulerMicros(evaluation), slotIndex: due.slotIndex.toString(10), scheduledAtMicros: canonicalSchedulerMicros(due.scheduledAtMicros), nextEligibleAtMicros: null, decision: "NO_ACTION", reason: "POLICY_DISABLED", owningPolicyVersion: owner });
   if (input.activeRunHistoricalState !== undefined && input.activeRunHistoricalState !== null) return Object.freeze({ kind: "DUE_EVALUATION", evaluationAtMicros: canonicalSchedulerMicros(evaluation), slotIndex: due.slotIndex.toString(10), scheduledAtMicros: canonicalSchedulerMicros(due.scheduledAtMicros), nextEligibleAtMicros: canonicalSchedulerMicros(due.nextEligibleAtMicros), decision: "NO_ACTION", reason: "ACTIVE_RUN", owningPolicyVersion: owner });
   if (due.slotIndex === 0n) return Object.freeze({ kind: "DUE_EVALUATION", evaluationAtMicros: canonicalSchedulerMicros(evaluation), slotIndex: "0", scheduledAtMicros: canonicalSchedulerMicros(due.scheduledAtMicros), nextEligibleAtMicros: canonicalSchedulerMicros(due.nextEligibleAtMicros), decision: "RUN_NOW", reason: "INITIAL_ELIGIBILITY", owningPolicyVersion: owner });
