@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { Pool, QueryResultRow } from "pg";
 import databasePool from "../db";
+import {
+  ClaimAuthorityTransactionClient,
+  persistClaimIdentityAuthorityWithinTransaction,
+  persistClaimVersionAuthorityWithinTransaction,
+} from "./claimHistoricalAuthorityWriter";
 
 const INITIAL_STATUS = "draft";
 const INITIAL_PUBLICATION_STATUS = "unpublished";
@@ -46,105 +51,118 @@ interface ClaimVersionRow extends QueryResultRow {
 
 type ClaimPool = Pick<Pool, "connect">;
 
-export async function createClaimWithInitialVersion(
+export interface ClaimCreationIds {
+  claimId: string;
+  versionId: string;
+  requestId: string;
+}
+
+export async function createClaimWithInitialVersionWithinTransaction(
+  client: ClaimAuthorityTransactionClient,
   input: CreateClaimInput,
-  pool: ClaimPool = databasePool,
+  ids: ClaimCreationIds = {
+    claimId: randomUUID(),
+    versionId: randomUUID(),
+    requestId: randomUUID(),
+  },
 ): Promise<CreatedClaim> {
+  await client.query(
+    "INSERT INTO public.claims (id) VALUES ($1)",
+    [ids.claimId],
+  );
+
+  const versionResult = await client.query<ClaimVersionRow>(
+    `INSERT INTO public.claim_versions (
+      id,
+      claim_id,
+      version_number,
+      title,
+      normalized_statement,
+      language,
+      claim_type,
+      status,
+      publication_status,
+      change_reason,
+      based_on_version_id,
+      actor_type,
+      actor_id,
+      source_type,
+      source_reference,
+      request_id,
+      created_at
+    ) VALUES (
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+      $11, $12, $13, $14, $15, $16, CURRENT_TIMESTAMP
+    )
+    RETURNING
+      id,
+      claim_id,
+      version_number,
+      title,
+      normalized_statement,
+      language,
+      claim_type,
+      status,
+      publication_status,
+      change_reason,
+      created_at`,
+    [
+      ids.versionId,
+      ids.claimId,
+      1,
+      input.title,
+      input.normalizedStatement,
+      input.language,
+      input.claimType,
+      INITIAL_STATUS,
+      INITIAL_PUBLICATION_STATUS,
+      INITIAL_CHANGE_REASON,
+      null,
+      "api",
+      null,
+      "api",
+      null,
+      ids.requestId,
+    ],
+  );
+
+  const version = versionResult.rows[0];
+  if (!version) {
+    throw new Error("Claim version insert returned no row");
+  }
+
+  return {
+    id: ids.claimId,
+    version: {
+      id: version.id,
+      claimId: version.claim_id,
+      versionNumber: version.version_number,
+      title: version.title,
+      normalizedStatement: version.normalized_statement,
+      language: version.language,
+      claimType: version.claim_type,
+      status: version.status,
+      publicationStatus: version.publication_status,
+      changeReason: version.change_reason,
+      createdAt: version.created_at,
+    },
+  };
+}
+
+async function runClaimTransaction<T>(
+  pool: ClaimPool,
+  work: (client: ClaimAuthorityTransactionClient) => Promise<T>,
+): Promise<T> {
   const client = await pool.connect();
-  const claimId = randomUUID();
-  const versionId = randomUUID();
-  const requestId = randomUUID();
   let transactionStarted = false;
   let destroyClient = false;
-
   try {
     await client.query("BEGIN");
     transactionStarted = true;
-
-    await client.query(
-      "INSERT INTO public.claims (id) VALUES ($1)",
-      [claimId],
-    );
-
-    const versionResult = await client.query<ClaimVersionRow>(
-      `INSERT INTO public.claim_versions (
-        id,
-        claim_id,
-        version_number,
-        title,
-        normalized_statement,
-        language,
-        claim_type,
-        status,
-        publication_status,
-        change_reason,
-        based_on_version_id,
-        actor_type,
-        actor_id,
-        source_type,
-        source_reference,
-        request_id,
-        created_at
-      ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-        $11, $12, $13, $14, $15, $16, CURRENT_TIMESTAMP
-      )
-      RETURNING
-        id,
-        claim_id,
-        version_number,
-        title,
-        normalized_statement,
-        language,
-        claim_type,
-        status,
-        publication_status,
-        change_reason,
-        created_at`,
-      [
-        versionId,
-        claimId,
-        1,
-        input.title,
-        input.normalizedStatement,
-        input.language,
-        input.claimType,
-        INITIAL_STATUS,
-        INITIAL_PUBLICATION_STATUS,
-        INITIAL_CHANGE_REASON,
-        null,
-        "api",
-        null,
-        "api",
-        null,
-        requestId,
-      ],
-    );
-
-    const version = versionResult.rows[0];
-    if (!version) {
-      throw new Error("Claim version insert returned no row");
-    }
-
+    const result = await work(client);
     await client.query("COMMIT");
     transactionStarted = false;
-
-    return {
-      id: claimId,
-      version: {
-        id: version.id,
-        claimId: version.claim_id,
-        versionNumber: version.version_number,
-        title: version.title,
-        normalizedStatement: version.normalized_statement,
-        language: version.language,
-        claimType: version.claim_type,
-        status: version.status,
-        publicationStatus: version.publication_status,
-        changeReason: version.change_reason,
-        createdAt: version.created_at,
-      },
-    };
+    return result;
   } catch (error) {
     if (transactionStarted) {
       try {
@@ -159,7 +177,6 @@ export async function createClaimWithInitialVersion(
         throw combinedError;
       }
     }
-
     throw error;
   } finally {
     if (destroyClient) {
@@ -168,4 +185,31 @@ export async function createClaimWithInitialVersion(
       client.release();
     }
   }
+}
+
+export async function createClaimWithInitialVersion(
+  input: CreateClaimInput,
+  pool: ClaimPool = databasePool,
+): Promise<CreatedClaim> {
+  return runClaimTransaction(pool, (client) =>
+    createClaimWithInitialVersionWithinTransaction(client, input),
+  );
+}
+
+export async function createClaimWithInitialVersionAndAuthority(
+  input: CreateClaimInput,
+  pool: ClaimPool = databasePool,
+): Promise<CreatedClaim> {
+  return runClaimTransaction(pool, async (client) => {
+    const created = await createClaimWithInitialVersionWithinTransaction(
+      client,
+      input,
+    );
+    await persistClaimIdentityAuthorityWithinTransaction(client, created.id);
+    await persistClaimVersionAuthorityWithinTransaction(
+      client,
+      created.version.id,
+    );
+    return created;
+  });
 }

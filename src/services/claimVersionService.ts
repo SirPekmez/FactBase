@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { Pool, QueryResultRow } from "pg";
 import databasePool from "../db";
+import {
+  ClaimAuthorityTransactionClient,
+  persistClaimVersionAuthorityWithinTransaction,
+  requireClaimIdentityAuthorityWithinTransaction,
+} from "./claimHistoricalAuthorityWriter";
 
 const REVISION_STATUS = "draft";
 const REVISION_PUBLICATION_STATUS = "unpublished";
@@ -94,10 +99,7 @@ export class ClaimVersionInvariantError extends Error {
 }
 
 function isVersionNumberConflict(error: unknown): error is PostgreSqlError {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-
+  if (!(error instanceof Error)) return false;
   const databaseError = error as PostgreSqlError;
   return (
     databaseError.code === "23505" &&
@@ -105,134 +107,117 @@ function isVersionNumberConflict(error: unknown): error is PostgreSqlError {
   );
 }
 
+export async function createClaimVersionWithinTransaction(
+  client: ClaimAuthorityTransactionClient,
+  input: CreateClaimVersionInput,
+  versionId = randomUUID(),
+  requestId = input.requestId ?? randomUUID(),
+): Promise<CreatedClaimVersion> {
+  const claimResult = await client.query<ClaimRow>(
+    `SELECT id FROM public.claims WHERE id = $1 FOR UPDATE`,
+    [input.claimId],
+  );
+  if (!claimResult.rows[0]) throw new ClaimNotFoundError(input.claimId);
+
+  const currentVersionResult = await client.query<CurrentVersionRow>(
+    `SELECT id, version_number
+     FROM public.claim_versions
+     WHERE claim_id = $1
+     ORDER BY version_number DESC
+     LIMIT 1`,
+    [input.claimId],
+  );
+  const currentVersion = currentVersionResult.rows[0];
+  if (!currentVersion) throw new ClaimVersionInvariantError(input.claimId);
+
+  const currentVersionNumber = currentVersion.version_number;
+  if (input.basedOnVersionNumber !== currentVersionNumber) {
+    throw new ClaimVersionConflictError(currentVersionNumber);
+  }
+
+  const versionResult = await client.query<ClaimVersionRow>(
+    `INSERT INTO public.claim_versions (
+      id, claim_id, version_number, title, normalized_statement, language,
+      claim_type, status, publication_status, change_reason,
+      based_on_version_id, actor_type, actor_id, source_type,
+      source_reference, request_id, created_at
+    ) VALUES (
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+      $11, $12, $13, $14, $15, $16, CURRENT_TIMESTAMP
+    )
+    RETURNING id, claim_id, version_number, title, normalized_statement,
+      language, claim_type, status, publication_status, change_reason, created_at`,
+    [
+      versionId,
+      input.claimId,
+      currentVersionNumber + 1,
+      input.title,
+      input.normalizedStatement,
+      input.language,
+      input.claimType,
+      REVISION_STATUS,
+      REVISION_PUBLICATION_STATUS,
+      input.changeReason,
+      currentVersion.id,
+      input.actorType ?? "api",
+      input.actorId ?? null,
+      input.sourceType ?? "api",
+      input.sourceReference ?? null,
+      requestId,
+    ],
+  );
+  const version = versionResult.rows[0];
+  if (!version) throw new Error("Claim version insert returned no row");
+
+  return {
+    claimId: input.claimId,
+    version: {
+      id: version.id,
+      claimId: version.claim_id,
+      versionNumber: version.version_number,
+      title: version.title,
+      normalizedStatement: version.normalized_statement,
+      language: version.language,
+      claimType: version.claim_type,
+      status: version.status,
+      publicationStatus: version.publication_status,
+      changeReason: version.change_reason,
+      createdAt: version.created_at,
+    },
+  };
+}
+
+async function refreshConflictVersionNumber(
+  client: ClaimAuthorityTransactionClient,
+  claimId: string,
+): Promise<number | undefined> {
+  const result = await client.query<CurrentVersionRow>(
+    `SELECT id, version_number
+     FROM public.claim_versions
+     WHERE claim_id = $1
+     ORDER BY version_number DESC
+     LIMIT 1`,
+    [claimId],
+  );
+  return result.rows[0]?.version_number;
+}
+
 export async function createClaimVersion(
   input: CreateClaimVersionInput,
   pool: ClaimVersionPool = databasePool,
 ): Promise<CreatedClaimVersion> {
   const client = await pool.connect();
-  const versionId = randomUUID();
-  const requestId = input.requestId ?? randomUUID();
   let transactionStarted = false;
   let destroyClient = false;
-  let currentVersionNumber: number | undefined;
-
   try {
     await client.query("BEGIN");
     transactionStarted = true;
-
-    const claimResult = await client.query<ClaimRow>(
-      `SELECT id
-      FROM public.claims
-      WHERE id = $1
-      FOR UPDATE`,
-      [input.claimId],
-    );
-
-    if (!claimResult.rows[0]) {
-      throw new ClaimNotFoundError(input.claimId);
-    }
-
-    const currentVersionResult = await client.query<CurrentVersionRow>(
-      `SELECT id, version_number
-      FROM public.claim_versions
-      WHERE claim_id = $1
-      ORDER BY version_number DESC
-      LIMIT 1`,
-      [input.claimId],
-    );
-
-    const currentVersion = currentVersionResult.rows[0];
-    if (!currentVersion) {
-      throw new ClaimVersionInvariantError(input.claimId);
-    }
-
-    currentVersionNumber = currentVersion.version_number;
-    if (input.basedOnVersionNumber !== currentVersionNumber) {
-      throw new ClaimVersionConflictError(currentVersionNumber);
-    }
-
-    const versionResult = await client.query<ClaimVersionRow>(
-      `INSERT INTO public.claim_versions (
-        id,
-        claim_id,
-        version_number,
-        title,
-        normalized_statement,
-        language,
-        claim_type,
-        status,
-        publication_status,
-        change_reason,
-        based_on_version_id,
-        actor_type,
-        actor_id,
-        source_type,
-        source_reference,
-        request_id,
-        created_at
-      ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-        $11, $12, $13, $14, $15, $16, CURRENT_TIMESTAMP
-      )
-      RETURNING
-        id,
-        claim_id,
-        version_number,
-        title,
-        normalized_statement,
-        language,
-        claim_type,
-        status,
-        publication_status,
-        change_reason,
-        created_at`,
-      [
-        versionId,
-        input.claimId,
-        currentVersionNumber + 1,
-        input.title,
-        input.normalizedStatement,
-        input.language,
-        input.claimType,
-        REVISION_STATUS,
-        REVISION_PUBLICATION_STATUS,
-        input.changeReason,
-        currentVersion.id,
-        input.actorType ?? "api",
-        input.actorId ?? null,
-        input.sourceType ?? "api",
-        input.sourceReference ?? null,
-        requestId,
-      ],
-    );
-
-    const version = versionResult.rows[0];
-    if (!version) {
-      throw new Error("Claim version insert returned no row");
-    }
-
+    const result = await createClaimVersionWithinTransaction(client, input);
     await client.query("COMMIT");
     transactionStarted = false;
-
-    return {
-      claimId: input.claimId,
-      version: {
-        id: version.id,
-        claimId: version.claim_id,
-        versionNumber: version.version_number,
-        title: version.title,
-        normalizedStatement: version.normalized_statement,
-        language: version.language,
-        claimType: version.claim_type,
-        status: version.status,
-        publicationStatus: version.publication_status,
-        changeReason: version.change_reason,
-        createdAt: version.created_at,
-      },
-    };
+    return result;
   } catch (error) {
     const versionNumberConflict = isVersionNumberConflict(error);
-
     if (transactionStarted) {
       try {
         await client.query("ROLLBACK");
@@ -247,35 +232,58 @@ export async function createClaimVersion(
         throw combinedError;
       }
     }
-
     if (versionNumberConflict) {
       let refreshedVersionNumber: number | undefined;
-
       try {
-        const refreshedVersionResult = await client.query<CurrentVersionRow>(
-          `SELECT id, version_number
-          FROM public.claim_versions
-          WHERE claim_id = $1
-          ORDER BY version_number DESC
-          LIMIT 1`,
-          [input.claimId],
+        refreshedVersionNumber = await refreshConflictVersionNumber(
+          client,
+          input.claimId,
         );
-        refreshedVersionNumber =
-          refreshedVersionResult.rows[0]?.version_number;
       } catch {
-        // A failed refresh must not leak a possibly stale version number.
         destroyClient = true;
       }
-
       throw new ClaimVersionConflictError(refreshedVersionNumber);
     }
-
     throw error;
   } finally {
-    if (destroyClient) {
-      client.release(true);
-    } else {
-      client.release();
+    if (destroyClient) client.release(true);
+    else client.release();
+  }
+}
+
+export async function createClaimVersionWithAuthority(
+  input: CreateClaimVersionInput,
+  pool: ClaimVersionPool = databasePool,
+): Promise<CreatedClaimVersion> {
+  const client = await pool.connect();
+  let transactionStarted = false;
+  let destroyClient = false;
+  try {
+    await client.query("BEGIN");
+    transactionStarted = true;
+    await requireClaimIdentityAuthorityWithinTransaction(client, input.claimId);
+    const result = await createClaimVersionWithinTransaction(client, input);
+    await persistClaimVersionAuthorityWithinTransaction(client, result.version.id);
+    await client.query("COMMIT");
+    transactionStarted = false;
+    return result;
+  } catch (error) {
+    if (transactionStarted) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        destroyClient = true;
+        const combinedError = new Error(
+          "Claim version creation failed and the transaction could not be rolled back",
+        ) as Error & { originalError: unknown; rollbackError: unknown };
+        combinedError.originalError = error;
+        combinedError.rollbackError = rollbackError;
+        throw combinedError;
+      }
     }
+    throw error;
+  } finally {
+    if (destroyClient) client.release(true);
+    else client.release();
   }
 }
