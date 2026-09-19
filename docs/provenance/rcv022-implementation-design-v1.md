@@ -1,13 +1,16 @@
 # RCV-022 Semantic Analysis Implementation Design V1
 
-Design status: draft for independent audit. This document implements the
-frozen RCV-022 Semantic Analysis Contract V1 but does not change that Contract,
-any upstream authority, or any semantic relation.
+Design status: targeted correction draft for independent audit. This document
+implements the corrected RCV-022 Semantic Analysis Contract V1 but does not
+change that Contract, any upstream authority, or any semantic relation. The
+previous Design was frozen against the pre-repair Contract and is invalidated
+until this tool-participation correction is independently re-audited and
+re-snapshot-locked.
 
 ## 1. Design boundary and repository patterns
 
-The frozen Contract is the sole semantic authority. Its verified SHA-256 is
-`8669dd2f6c91eee7b386d343d28edf8c5b67b5cec7a203b3331c2b4b01d2fba9`.
+The corrected Contract is the sole semantic authority. Its verified SHA-256 is
+`5fc81fdb891d5c823d49ea0de710f455ff222ef3229c78ff4bd42ba243d5b01a`.
 
 The design reuses the repository patterns already proven by Claim Historical
 Authority, RCV-019, RCV-020, and RCV-021:
@@ -201,6 +204,14 @@ The writer and reader require exact key sets, exact closed relation values,
 exact method variant keys, omission of not-applicable fields, and parity
 between every projection and the canonical object. `structuredOutputHash` has
 only one authority location: the embedded method provenance.
+
+`toolParticipation` is stored only inside the existing
+`method_provenance` JSONB projection and its canonical object. It is not a
+separate relational column, table, foreign key, or ToolExecution authority;
+the existing canonical text plus methodProvenance projection is sufficient
+for database admission and historical verification. Therefore
+`NEW_COLUMN_REQUIRED = NO`, `NEW_TABLE_REQUIRED = NO`, and
+`NEW_FK_REQUIRED = NO`.
 
 `assessed_at` is serialized to the Contract's canonical UTC timestamp form
 before canonical construction. It is provenance, not a truth time or cutoff.
@@ -435,9 +446,15 @@ For each embedded Contract object (`locator`, `contentBinding`,
 `assessmentRefs`), the validator checks the exact variant key set: missing or
 extra keys, forbidden JSON null, wrong variant keys, and present
 NOT_APPLICABLE keys are rejected. Conditional fields are exact:
-`toolContextHash` is present and non-null only when tools materially
-participated; otherwise the key is absent, never JSON null. `acceptanceStatus`
-is present only for MIXED; non-MIXED variants must omit it.
+`toolParticipation` is mandatory in `MODEL_ASSISTED` and `MIXED`, is a JSON
+string, and is exactly `USED` or `NOT_USED`; null, omission, aliases, boolean
+values, `UNKNOWN`, and `UNSPECIFIED` are invalid. It is the persisted
+determinant, not a value inferred from `toolContextHash`, model configuration,
+provider state, method or process hashes, output hashes, or input hashes. When
+it is `USED`, `toolContextHash` must be present, non-null, and a valid
+lowercase SHA-256 hash. When it is `NOT_USED`, `toolContextHash` must be
+absent; JSON null, empty strings, and placeholder hashes are invalid.
+`acceptanceStatus` is present only for MIXED; non-MIXED variants must omit it.
 `samplingParameters` uses the Contract's ordered entries shape and its hash is
 the SHA-256 of its exact JCS UTF-8 bytes. The Envelope `matchRefs` and
 `assessmentRefs` keys must exist and be JSON arrays; `[]` is valid, while a
@@ -551,7 +568,8 @@ The module validates:
 - DIRECT/DERIVED extraction authority;
 - exact `assessmentResult` relation/rationale;
 - all four exact method provenance variants, including sampling parameter
-  entries, review/acceptance status, conditional tool context, and omitted
+  entries, review/acceptance status, the authenticated
+  `toolParticipation`/`toolContextHash` conditional, and omitted
   not-applicable keys;
 - ordered unique Envelope references and zero-member rules.
 
@@ -603,7 +621,8 @@ methodProvenance variants:
     providerIdentity modelIdentity modelVersion processIdentity processVersion
     processHash promptTemplateHash systemInstructionHash samplingParameters
     samplingParametersHash inputCanonicalHashes rawOutputHash
-    structuredOutputHash retryIdentity reviewStatus [toolContextHash]
+    structuredOutputHash retryIdentity reviewStatus toolParticipation
+    [toolContextHash]
   HUMAN = methodType methodIdentity methodVersion methodHash reviewerIdentity
     reviewProcessIdentity reviewProcessVersion reviewProcessHash
     inputCanonicalHashes structuredOutputHash reviewStatus
@@ -613,9 +632,19 @@ methodProvenance variants:
     samplingParametersHash inputCanonicalHashes rawOutputHash
     structuredOutputHash retryIdentity reviewerIdentity reviewProcessIdentity
     reviewProcessVersion reviewProcessHash reviewStatus acceptanceStatus
+    toolParticipation
     [toolContextHash]
 samplingParameters: { schema, canonicalVersion, entries: [{ name, value }] }
 ```
+
+The canonical builder requires `toolParticipation` in MODEL_ASSISTED and
+MIXED input. It emits `toolParticipation: "USED"` together with
+`toolContextHash` only when the immutable input declares `USED`; it emits
+`toolParticipation: "NOT_USED"` and omits `toolContextHash` entirely when the
+declaration is `NOT_USED`. It never emits JSON null or a placeholder. The
+field is inside `methodProvenance`, so changing it changes the canonical
+EvidenceAssessment bytes and hash. The builder validates the exact enum and
+conditional hash domain without consulting runtime or provider state.
 
 No SQL column, generated projection, JSONB key, or support row adds a
 canonical semantic field. Any duplicated dependency column is checked against
@@ -726,6 +755,14 @@ Each primitive:
    canonical, and projection byte exactly;
 6. returns the authenticated binding or fails closed.
 
+The EvidenceAssessment writer receives the already-decided immutable
+`toolParticipation` value in its provenance input. It validates the exact
+`USED`/`NOT_USED` enum and applies the corresponding `toolContextHash`
+presence rule before constructing canonical bytes. It never infers tool use
+from hash presence, model configuration, available tools, provider state,
+method/process hashes, raw output, or input hashes, and it never silently
+adds, removes, or normalizes either field.
+
 There is no generic legacy-authentication operation. A missing Claim,
 ClaimVersion, Capture, or upstream authority is a deterministic failure, not
 an invitation to hash current values.
@@ -759,7 +796,9 @@ Assigned identity is the idempotency key:
 - same assigned ID plus byte-identical authority returns the existing
   authenticated row;
 - same assigned ID plus any divergent dependency, canonical, projection, or
-  hash fails with `DUPLICATE_CONFLICT`;
+  hash fails with `DUPLICATE_CONFLICT`; changing `toolParticipation`, the
+  presence of `toolContextHash`, or its value is likewise a divergent
+  authority;
 - distinct assigned IDs are never collapsed, even with identical payloads;
 - a duplicate Match or Assessment reference within one Envelope fails before
   commit;
@@ -806,6 +845,16 @@ The reader collects failures and sorts by this precedence, then by failure
 class path and UTF-8 byte order. Database row order can never select the
 result. It returns immutable verified bindings and a deterministic contradiction
 projection; it does not persist a ContradictionFinding.
+
+For MODEL_ASSISTED and MIXED, the verifier reads `toolParticipation` from the
+authenticated persisted canonical methodProvenance and applies the same
+conditional rule: USED requires a present, non-null, valid lowercase
+`toolContextHash`; NOT_USED requires the key to be absent. Presence of
+`toolContextHash` never determines `toolParticipation`. The verifier proves
+the immutable declaration, canonical/hash integrity, and declaration/hash
+consistency, but does not independently attest external runtime truth beyond
+authenticated persisted provenance. No current model, tool, provider, or
+runtime state is consulted.
 
 Before and after snapshots in every corruption test must be byte/structurally
 equal. The verifier never inserts, updates, deletes, normalizes, regenerates,
@@ -885,6 +934,15 @@ Envelopes, multiple Assessments for one Match, duplicate reference rejection,
 concurrency, identical retry, divergent duplicate, and rollback after every
 write stage.
 
+The method-provenance structural matrix additionally proves, for both
+MODEL_ASSISTED and MIXED, USED with a valid hash, USED with missing or JSON-null
+hash, NOT_USED with absent hash, NOT_USED with present/null/placeholder hash,
+missing/null/unsupported `toolParticipation`, and the valid MIXED
+`acceptanceStatus` requirement. DETERMINISTIC and HUMAN fixtures containing
+`toolParticipation` or `toolContextHash` are rejected as extra/not-applicable
+keys. These are structural admission proofs only; no model or tool execution
+is implemented in this Design.
+
 ## 13. Implementation waves
 
 ### Wave A — additive schema and guards
@@ -895,6 +953,27 @@ deferred membership-parity constraint triggers, and six immutable triggers.
 Prove catalog shape, direct-SQL admission rejection, COMMIT-time parity, and
 mutation rejection on fresh PostgreSQL. Do not alter any upstream migration or
 source table.
+
+The current Wave A migration candidate and its tests are
+`IMPLEMENTATION_CANDIDATE_INVALIDATED_BY_CORRECTED_CONTRACT` and
+`TEST_CANDIDATES_INVALIDATED_BY_CORRECTED_CONTRACT`, respectively, because
+their pre-repair methodProvenance admission shape lacks mandatory
+`toolParticipation`. They remain untouched in this Design correction. After
+this Design is re-snapshot-locked, the future Wave A correction is limited to
+the methodProvenance admission rule, corresponding structural fixtures, and
+stale exact-shape assertions; unrelated physical proofs remain unchanged.
+
+The explicit correction status is:
+
+```text
+CURRENT_WAVE_A_MIGRATION_STATUS = IMPLEMENTATION_CANDIDATE_INVALIDATED_BY_CORRECTED_CONTRACT
+CURRENT_WAVE_A_TEST_STATUS = TEST_CANDIDATES_INVALIDATED_BY_CORRECTED_CONTRACT
+FUTURE_WAVE_A_CORRECTION_SCOPE = methodProvenance admission, structural fixtures, and stale exact-shape assertions only
+READY_FOR_RCV022_DESIGN_RESNAPSHOT = NO
+READY_FOR_RCV022_WAVE_A_CORRECTION = NO
+READY_FOR_RCV022_WAVE_A = NO
+READY_FOR_RCV022_WAVE_B = NO
+```
 
 ### Wave B — canonical core and transaction-neutral writers
 
@@ -941,6 +1020,8 @@ The eventual proof must include:
   optional RCV-019/RCV-021 input-hash commitment structure/parity (without
   typed upstream-lineage resolution);
 - all four relation values and all four method provenance variants;
+- MODEL_ASSISTED and MIXED `toolParticipation`/`toolContextHash` conditional
+  matrix, plus rejection of tool fields in DETERMINISTIC and HUMAN;
 - TEXT, STRUCTURED, and IMAGE_REGION tag compatibility, zero-based paths,
   image dimensions/bounds, and invalid-tag rejection;
 - zero Matches, zero Assessments, and zero-Match-implies-zero-Assessment;
@@ -1001,6 +1082,16 @@ empty canonical arrays with zero support rows -> COMMIT succeeds
 support row added to an empty canonical array -> COMMIT rejected
 Assessment whose Match is absent from the same Envelope -> COMMIT rejected
 ```
+
+The same physical admission proof includes the corrected method-provenance
+matrix: MODEL_ASSISTED and MIXED with USED plus a valid hash succeed; USED with
+missing, null, or invalid hash fails; NOT_USED with no toolContextHash
+succeeds; NOT_USED with a present, null, empty, or placeholder hash fails;
+missing, null, or unsupported `toolParticipation` fails; MIXED requires its
+valid `acceptanceStatus`; and DETERMINISTIC/HUMAN reject either tool field as
+not applicable. Each case uses otherwise-valid canonical/projection values so
+the intended method-authority invariant, rather than an unrelated FK or hash
+failure, is the rejection path.
 
 The deferred constraint triggers inspect the final transaction-visible state,
 so these checks cover staged intermediate states and direct-SQL bypasses.
@@ -1088,19 +1179,22 @@ RCV-020 Capture lineage.
 
 ## 17. Internal design consistency audit
 
-The Design was re-read against the frozen Contract and repository authority
+The Design was re-read against the corrected Contract and repository authority
 boundaries. The following values are the required internal audit result before
 independent Design audit:
 
 ```text
 DESIGN_MISSING = 0
 DESIGN_WEAKENED = 0
-DESIGN_EXPANDED = 0
+DESIGN_EXPANDED_BEYOND_REPAIR = 0
 DESIGN_CONTRADICTORY = 0
 DESIGN_AMBIGUOUS = 0
 SEMANTIC_INVENTION = 0
 AUTHORITY_LEAKAGE = 0
 CURRENT_STATE_SUBSTITUTION_RISK = 0
+SEMANTIC_AUTHORITY_ENTITY_COUNT = 4
+PHYSICAL_TABLE_COUNT = 6
+FK_COUNT = 14
 CONTRACT_FIELD_DRIFT = 0
 RELATION_SET_DRIFT = 0
 METHOD_PROVENANCE_DRIFT = 0
@@ -1115,7 +1209,22 @@ TRUTH_ADJUDICATION_LEAKAGE = 0
 TRANSACTION_BOUNDARY_AMBIGUITY = 0
 VERIFIER_PRECEDENCE_AMBIGUITY = 0
 TEST_PROOF_AMBIGUITY = 0
+TOOL_PARTICIPATION_STORAGE_AMBIGUITY = 0
+TOOL_PARTICIPATION_WRITER_AMBIGUITY = 0
+TOOL_PARTICIPATION_ADMISSION_AMBIGUITY = 0
+TOOL_PARTICIPATION_VERIFIER_AMBIGUITY = 0
+TOOL_CONTEXT_CONDITIONAL_AMBIGUITY = 0
+CIRCULAR_TOOL_CONTEXT_INFERENCE = 0
+CLAIM_STRENGTH_OVERREACH = 0
+FOUR_AUTHORITY_MODEL_DRIFT = 0
+PHYSICAL_TABLE_SET_DRIFT = 0
+FK_SET_DRIFT = 0
+OPTIONAL_INPUT_MODEL_DRIFT = 0
+NO_REPAIR_DRIFT = 0
 OPEN_DESIGN_QUESTIONS = 0
 ```
 
 This Design is not a migration, implementation, test file, or snapshot lock.
+The corrected Contract is re-snapshot-locked, but this Design remains pending
+the separate independent Design re-audit and re-snapshot. Wave A correction and
+all later waves remain blocked until that gate passes.
