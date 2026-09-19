@@ -1,9 +1,12 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const { Pool } = require("pg");
+const crypto = require("node:crypto");
 const { persistRcv020Authority } = require("../dist/services/rcv020PersistenceService");
 const { insertHandoff } = require("../dist/services/rcv020PostgresRepository");
 const { sha256Rcv020Text } = require("../dist/services/rcv020Canonical");
+const { canonicalizeRcv020RetentionAvailabilityEvent } = require("../dist/services/rcv020SemanticCore");
+const { Rcv020ReadService } = require("../dist/services/rcv020ReadService");
 
 const DB = process.env.RCV020_W3_DATABASE;
 const enabled = Boolean(DB && process.env.PGHOST && process.env.PGPORT);
@@ -37,6 +40,10 @@ function bundle(seed = 0) {
   return { contractVersion: 1, sources: [source], monitors: [monitor], configurations: [config], lifecycleEvents: [lifecycle], occurrences: [occurrence], occurrenceResolutions: [occurrenceResolution], attempts: [attempt], attemptResolutions: [attemptResolution], captures: [capture], comparisons: [comparison], retentionEvents: [], handoffs: [], quarantine: [] };
 }
 function handoff() { return { handoffId: id(13), captureId: id(27), logicalSourceId: id(21), monitorId: id(22), monitorConfigurationVersionId: id(23), occurrenceId: id(24), retrievalAttemptId: id(25), captureHash: "a".repeat(64), rawAvailabilitySnapshot: "METADATA_HASH_ONLY", observedAt: ts(3), provenanceManifest: "{}", handoffCanonical: "{}", handoffHash: emptyHash, idempotencyKey: "w3-handoff-1" }; }
+function handoffForSeed(seed) {
+  const base = seed * 20;
+  return { handoffId: id(base + 13), captureId: id(base + 7), logicalSourceId: id(base + 1), monitorId: id(base + 2), monitorConfigurationVersionId: id(base + 3), occurrenceId: id(base + 4), retrievalAttemptId: id(base + 5), captureHash: "a".repeat(64), rawObjectIdentity: `sha256:blob-${seed}`, rawAvailabilitySnapshot: "AVAILABLE", observedAt: ts(3), provenanceManifest: "{}", handoffCanonical: "{}", handoffHash: emptyHash, idempotencyKey: `w3-handoff-${seed}` };
+}
 
 test("Wave 3 persists a complete valid authority set atomically", { skip: !enabled }, async () => {
   const result = await persistRcv020Authority(pool, bundle(1));
@@ -90,6 +97,68 @@ test("Wave 3 duplicate and divergent identity behavior is fail-closed", { skip: 
   await assert.rejects(() => persistRcv020Authority(pool, divergent));
   const rows = await pool.query("SELECT count(*)::int AS count FROM public.rcv020_logical_sources WHERE logical_source_id=$1", [id(21)]);
   assert.equal(Number(rows.rows[0].count), 1);
+});
+
+test("RCV-020 identical successful bytes remain distinct Capture occurrences", { skip: !enabled }, async () => {
+  const first = bundle(600);
+  const second = bundle(601);
+  const sameBytesHash = crypto.createHash("sha256").update(Buffer.from("same bytes")).digest("hex");
+  first.captures[0].contentHash = sameBytesHash;
+  second.captures[0].contentHash = sameBytesHash;
+  first.captures[0].byteLength = "10";
+  second.captures[0].byteLength = "10";
+  await persistRcv020Authority(pool, first);
+  await persistRcv020Authority(pool, second);
+  const result = await pool.query(`SELECT o.occurrence_id, a.attempt_id, c.capture_id, c.content_hash
+    FROM public.rcv020_observation_occurrences o
+    JOIN public.rcv020_retrieval_attempts a ON a.occurrence_id = o.occurrence_id
+    JOIN public.rcv020_captures c ON c.retrieval_attempt_id = a.attempt_id
+    WHERE o.occurrence_id IN ($1,$2) ORDER BY o.occurrence_id`, [id(4 + 600 * 20), id(4 + 601 * 20)]);
+  assert.equal(result.rows.length, 2);
+  assert.equal(result.rows[0].content_hash, result.rows[1].content_hash);
+  for (const key of ["occurrence_id", "attempt_id", "capture_id"]) assert.notEqual(result.rows[0][key], result.rows[1][key], key);
+});
+
+test("RCV-020 invalid payload bytes remain quarantine-only", { skip: !enabled }, async () => {
+  const failed = bundle(602);
+  failed.attemptResolutions[0] = { ...failed.attemptResolutions[0], outcome: "FAILED", failureCode: "PAYLOAD_TOO_LARGE", failureTaxonomyVersion: 1 };
+  failed.occurrenceResolutions[0] = { ...failed.occurrenceResolutions[0], outcome: "FAILED" };
+  failed.captures = [];
+  failed.comparisons = [];
+  failed.quarantine = [{ quarantineId: id(302 * 20 + 11), attemptId: failed.attempts[0].attemptId, reason: "PAYLOAD_TOO_LARGE", policyCanonical: "{}", objectIdentity: "sha256:invalid-payload", payloadHash: "b".repeat(64), byteLength: "4" }];
+  await persistRcv020Authority(pool, failed);
+  const counts = await pool.query(`SELECT
+    (SELECT count(*) FROM public.rcv020_captures WHERE occurrence_id=$1)::int AS captures,
+    (SELECT count(*) FROM public.rcv020_authenticated_handoffs WHERE occurrence_id=$1)::int AS handoffs,
+    (SELECT count(*) FROM public.rcv020_quarantined_payloads WHERE attempt_id=$2)::int AS quarantine`, [failed.occurrences[0].occurrenceId, failed.attempts[0].attemptId]);
+  assert.deepEqual(counts.rows[0], { captures: 0, handoffs: 0, quarantine: 1 });
+  const occurrence = await pool.query("SELECT outcome FROM public.rcv020_observation_occurrence_resolutions WHERE occurrence_id=$1", [failed.occurrences[0].occurrenceId]);
+  assert.equal(occurrence.rows[0].outcome, "FAILED");
+});
+
+test("RCV-020 handoff snapshot survives later availability loss", { skip: !enabled }, async () => {
+  const seed = 603;
+  const input = bundle(seed);
+  input.captures[0].retentionPolicy = "PERMANENT_RAW";
+  input.captures[0].rawObjectIdentity = `sha256:blob-${seed}`;
+  input.captures[0].rawObjectReference = `memory://blob-${seed}`;
+  input.captures[0].finalUrl = null;
+  input.captures[0].redirectCanonical = null;
+  await persistRcv020Authority(pool, input);
+  const h = handoffForSeed(seed);
+  await insertHandoff(pool, h);
+  const before = await pool.query("SELECT handoff_canonical, handoff_hash, raw_object_identity, raw_availability_snapshot FROM public.rcv020_authenticated_handoffs WHERE handoff_id=$1", [h.handoffId]);
+  const retention = { eventId: id(seed * 20 + 14), captureId: input.captures[0].captureId, eventType: "LOST", eventAt: ts(4), eventSequence: "1", reason: "object unavailable", policyLegalBasis: null, resultingAvailability: "UNAVAILABLE" };
+  const encoded = canonicalizeRcv020RetentionAvailabilityEvent(retention);
+  await pool.query(`INSERT INTO public.rcv020_retention_availability_events
+    (event_id,capture_id,event_type,reason,policy_legal_basis,event_at,resulting_availability,event_sequence,canonical,canonical_hash)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [retention.eventId, retention.captureId, retention.eventType, retention.reason, null, retention.eventAt, retention.resultingAvailability, retention.eventSequence, encoded.canonical, encoded.hash]);
+  const after = await pool.query("SELECT handoff_canonical, handoff_hash, raw_object_identity, raw_availability_snapshot FROM public.rcv020_authenticated_handoffs WHERE handoff_id=$1", [h.handoffId]);
+  assert.deepEqual(after.rows, before.rows);
+  const verified = await new Rcv020ReadService(pool).readOccurrence(input.occurrences[0].occurrenceId);
+  assert.equal(verified.observed, true);
+  assert.equal(verified.authenticated, true);
+  assert.equal(verified.replayable, false);
 });
 
 test("Wave 3 transaction failure leaves no partial relational authority", { skip: !enabled }, async () => {

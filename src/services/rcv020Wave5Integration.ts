@@ -127,7 +127,10 @@ export async function executeRcv020OperationalSlice(
   const coverage = deriveRcv020ScheduledCoverage(
     input.bundle.occurrences ?? [],
     (input.bundle.occurrenceResolutions ?? []).map((value) => ({ occurrenceId: value.occurrenceId, outcome: value.outcome as Rcv020OccurrenceOutcome })),
-    (input.bundle.attempts ?? []).map((value) => value.occurrenceId),
+    (input.bundle.attempts ?? []).map((value) => ({
+      occurrenceId: value.occurrenceId,
+      terminal: (input.bundle.attemptResolutions ?? []).some((resolution) => resolution.attemptId === value.attemptId),
+    })),
   );
   return Object.freeze({ adapterResult, persistence, verified, coverage, requestCanonical: request.canonical, requestHash: request.hash });
 }
@@ -141,22 +144,47 @@ export interface Rcv020ScheduledCoverage {
   readonly skipped: number;
 }
 
+/**
+ * Immutable attempt-boundary evidence supplied to coverage derivation.
+ * `terminal` is established from persisted AttemptResolution authority before
+ * this projection is called; the projection never consults a clock or infers
+ * a timeout from absence.
+ */
+export interface Rcv020CoverageAttempt {
+  readonly occurrenceId: string;
+  readonly terminal: boolean;
+}
+
 /** Derives scheduled coverage only from persisted occurrence/attempt authority. */
 export function deriveRcv020ScheduledCoverage(
   occurrences: readonly Rcv020ObservationOccurrence[],
   occurrenceResolutions: readonly { occurrenceId: string; outcome: Rcv020OccurrenceOutcome }[],
-  attemptOccurrenceIds: readonly string[],
+  attempts: readonly Rcv020CoverageAttempt[],
 ): Rcv020ScheduledCoverage {
   const scheduled = occurrences.filter((occurrence) => occurrence.triggerOrigin === "SCHEDULED");
-  const attempted = new Set(attemptOccurrenceIds);
-  const resolutions = new Map(occurrenceResolutions.map((resolution) => [resolution.occurrenceId, resolution.outcome]));
+  const attempted = new Map<string, Rcv020CoverageAttempt>();
+  for (const attempt of attempts) {
+    if (attempted.has(attempt.occurrenceId)) throw new Error("scheduled coverage has duplicate attempt occurrence authority");
+    if (!attempt.terminal) throw new Error("scheduled coverage requires terminal attempt authority");
+    attempted.set(attempt.occurrenceId, attempt);
+  }
+  const resolutions = new Map<string, Rcv020OccurrenceOutcome>();
+  for (const resolution of occurrenceResolutions) {
+    if (resolutions.has(resolution.occurrenceId)) throw new Error("scheduled coverage has duplicate occurrence resolution authority");
+    resolutions.set(resolution.occurrenceId, resolution.outcome);
+  }
   let succeeded = 0; let failed = 0; let missed = 0; let skipped = 0;
   for (const occurrence of scheduled) {
     const outcome = resolutions.get(occurrence.occurrenceId);
+    const attempt = attempted.get(occurrence.occurrenceId);
+    if (attempt && outcome === undefined) throw new Error("scheduled coverage requires terminal occurrence resolution");
+    if (attempt && (outcome === "MISSED" || outcome === "SKIPPED")) throw new Error("scheduled coverage outcome hides retrieval attempt");
+    if (!attempt && outcome !== undefined && outcome !== "MISSED" && outcome !== "SKIPPED") throw new Error("scheduled coverage outcome lacks retrieval attempt authority");
     if (outcome === "SUCCEEDED") succeeded += 1;
     else if (outcome === "FAILED") failed += 1;
     else if (outcome === "SKIPPED") skipped += 1;
-    else if (outcome === "MISSED" || !attempted.has(occurrence.occurrenceId)) missed += 1;
+    else if (outcome === "MISSED" || !attempt) missed += 1;
+    else throw new Error("scheduled coverage has unsupported terminal outcome");
   }
   return Object.freeze({ expected: scheduled.length, attempted: scheduled.filter((occurrence) => attempted.has(occurrence.occurrenceId)).length, succeeded, failed, missed, skipped });
 }

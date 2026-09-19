@@ -245,12 +245,13 @@ export class Rcv020PostgresReadRepository {
           ${utc("created_at")} AS created_at
          FROM public.rcv020_capture_comparisons WHERE current_capture_id = ANY($1::uuid[])
          ORDER BY current_capture_id, comparison_algorithm_id, comparison_algorithm_version`, [captureIds]) : { rows: [] };
-      const retentionResult = await client.query(
+      const retentionResult = captureIds.length ? await client.query(
         `SELECT event_id, capture_id, event_type, reason, policy_legal_basis, ${utc("event_at")} AS event_at,
           resulting_availability, event_sequence::text AS event_sequence, canonical, canonical_hash,
           ${utc("created_at")} AS created_at
          FROM public.rcv020_retention_availability_events
-         ORDER BY capture_id, event_sequence::numeric, event_id`);
+         WHERE capture_id = ANY($1::uuid[])
+         ORDER BY capture_id, event_sequence::numeric, event_id`, [captureIds]) : { rows: [] };
       const handoffsResult = captureIds.length ? await client.query(
         `SELECT handoff_id, capture_id, logical_source_id, monitor_id, monitor_configuration_version_id,
           occurrence_id, retrieval_attempt_id, capture_hash, raw_object_identity, raw_availability_snapshot,

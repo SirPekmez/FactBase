@@ -81,6 +81,20 @@ test('raw loss preserves observation/authentication while ending replayability',
   assert.equal(lost.observed, true); assert.equal(lost.authenticated, true); assert.equal(lost.replayable, false);
 });
 
+test('downstream interpretation failure cannot rewrite a valid Capture', () => {
+  const b = validBundle();
+  const before = JSON.stringify({ captures: b.captures, occurrenceResolution: b.occurrenceResolution });
+  const observed = verifier.verifyRcv020ReadBundle(b);
+  assert.equal(observed.observed, true);
+  assert.equal(observed.authenticated, true);
+  assert.throws(() => { throw new Error('downstream text extraction failed'); }, /downstream/);
+  const after = verifier.verifyRcv020ReadBundle(b);
+  assert.equal(after.observed, true);
+  assert.equal(after.authenticated, true);
+  assert.equal(after.occurrenceOutcome, 'SUCCEEDED');
+  assert.equal(JSON.stringify({ captures: b.captures, occurrenceResolution: b.occurrenceResolution }), before);
+});
+
 test('Wave 4 read determinism soak: exactly 1000 executions', () => {
   const b = validBundle(); const expected = JSON.stringify(verifier.verifyRcv020ReadBundle(b));
   for (let i = 0; i < 1000; i += 1) assert.equal(JSON.stringify(verifier.verifyRcv020ReadBundle(b)), expected);

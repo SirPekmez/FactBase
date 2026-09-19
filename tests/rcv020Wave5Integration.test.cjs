@@ -24,8 +24,35 @@ test("Wave 5 scheduled coverage is derived from occurrence authority only", () =
   ];
   const coverage = wave5.deriveRcv020ScheduledCoverage(occurrences,
     [{ occurrenceId: occurrences[0].occurrenceId, outcome: "SUCCEEDED" }, { occurrenceId: occurrences[1].occurrenceId, outcome: "SKIPPED" }, { occurrenceId: occurrences[2].occurrenceId, outcome: "MISSED" }],
-    [occurrences[0].occurrenceId]);
+    [{ occurrenceId: occurrences[0].occurrenceId, terminal: true }]);
   assert.deepEqual(coverage, { expected: 3, attempted: 1, succeeded: 1, failed: 0, missed: 1, skipped: 1 });
+});
+
+test("Wave 5 coverage fails closed for an unresolved attempt", () => {
+  const occurrence = { occurrenceId: "00000000-0000-4000-8000-000000000020", triggerOrigin: "SCHEDULED" };
+  assert.throws(() => wave5.deriveRcv020ScheduledCoverage(
+    [occurrence],
+    [],
+    [{ occurrenceId: occurrence.occurrenceId, terminal: false }],
+  ), /terminal attempt authority/);
+});
+
+test("Wave 5 terminal coverage is deterministic and does not infer late outcomes", () => {
+  const occurrence = { occurrenceId: "00000000-0000-4000-8000-000000000021", triggerOrigin: "SCHEDULED" };
+  const resolution = [{ occurrenceId: occurrence.occurrenceId, outcome: "FAILED" }];
+  const attempts = [{ occurrenceId: occurrence.occurrenceId, terminal: true }];
+  const first = wave5.deriveRcv020ScheduledCoverage([occurrence], resolution, attempts);
+  const originalNow = Date.now;
+  try {
+    Date.now = () => 0;
+    const historical = wave5.deriveRcv020ScheduledCoverage([occurrence], resolution, attempts);
+    Date.now = () => Number.MAX_SAFE_INTEGER;
+    const later = wave5.deriveRcv020ScheduledCoverage([occurrence], resolution, attempts);
+    assert.deepEqual(historical, first);
+    assert.deepEqual(later, first);
+  } finally {
+    Date.now = originalNow;
+  }
 });
 
 test("Wave 5 does not treat equivalent bytes as the same Capture identity", () => {

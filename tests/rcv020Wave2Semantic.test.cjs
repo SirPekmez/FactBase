@@ -97,6 +97,23 @@ test("RCV-020 retry, terminal, Capture, and directional comparison semantics", (
   assert.throws(() => core.validateCaptureComparison({ ...comparison, result: "UNCHANGED" }, captures[0], { ...prior, observedAt: time(6) }), contract.Rcv020ValidationError);
 });
 
+test("RCV-020 terminal boundary rejects in-flight and late success authority", () => {
+  const o = occurrence("SCHEDULED", 15);
+  const inFlight = attempt(1, 32, 15, null, 3, 10);
+  assert.throws(() => core.resolveOccurrenceTerminal(o, [inFlight], [], []), contract.Rcv020ValidationError);
+  const late = resolution(32, "CAPTURED_CHANGED", 11);
+  const cap = capture(33, 32, 15, 11);
+  assert.throws(() => core.validateAttemptSet([inFlight], new Map([[o.occurrenceId, o]]), new Map([[late.attemptId, late]])), contract.Rcv020ValidationError);
+  assert.throws(() => core.resolveOccurrenceTerminal(o, [inFlight], [late], [cap]), contract.Rcv020ValidationError);
+  const failed = resolution(32, "FAILED", 10, "TIMEOUT");
+  assert.equal(core.resolveOccurrenceTerminal(o, [inFlight], [failed], []), "FAILED");
+  const parserFailed = resolution(32, "FAILED", 9, "PARSER_FAILURE");
+  assert.equal(core.resolveOccurrenceTerminal(o, [inFlight], [parserFailed], []), "FAILED");
+  const historical = [failed];
+  assert.throws(() => core.resolveOccurrenceTerminal(o, [inFlight], [...historical, resolution(32, "CAPTURED_CHANGED", 9)], [cap]), contract.Rcv020ValidationError);
+  assert.equal(core.resolveOccurrenceTerminal(o, [inFlight], historical, []), "FAILED");
+});
+
 const negativeCases = [
   ["malformed canonical", () => canonical.canonicalizeRcv020({ x: undefined })],
   ["hash mismatch", () => canonical.assertRcv020HashMatches("x", hash("b"))],
