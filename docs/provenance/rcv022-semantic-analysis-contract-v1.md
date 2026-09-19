@@ -328,6 +328,13 @@ placeholders; not-applicable fields are omitted. Missing required provenance
 fails closed. `structuredOutputHash` and, where applicable, `rawOutputHash`
 occur only inside this object.
 
+`toolParticipation` is a mandatory closed provenance field in `MODEL_ASSISTED`
+and `MIXED`, with exactly the values `USED` and `NOT_USED`. It is the
+authenticated persisted declaration of whether tools materially participated in
+producing that Assessment execution. It is not inferred from method identity,
+method or process hashes, model configuration, provider state, output hashes,
+input hashes, or the presence of `toolContextHash`.
+
 `reviewStatus` is exactly `NOT_REVIEWED` or `REVIEWED` in every variant.
 `acceptanceStatus` occurs only in `MIXED` and is exactly `PENDING`, `ACCEPTED`,
 or `REJECTED`. These are provenance statuses only; they do not alter the
@@ -368,7 +375,8 @@ MODEL_ASSISTED:
   modelIdentity modelVersion processIdentity processVersion processHash
   promptTemplateHash systemInstructionHash samplingParameters
   samplingParametersHash inputCanonicalHashes rawOutputHash
-  structuredOutputHash retryIdentity reviewStatus [toolContextHash]
+  structuredOutputHash retryIdentity reviewStatus toolParticipation
+  [toolContextHash]
 
 HUMAN:
   methodType methodIdentity methodVersion methodHash reviewerIdentity
@@ -382,16 +390,24 @@ MIXED:
   samplingParametersHash inputCanonicalHashes rawOutputHash
   structuredOutputHash retryIdentity reviewerIdentity reviewProcessIdentity
   reviewProcessVersion reviewProcessHash reviewStatus acceptanceStatus
+  toolParticipation
   [toolContextHash]
 ```
 
-`toolContextHash` is required in `MODEL_ASSISTED` and `MIXED` exactly when
-tools materially participated in execution; otherwise it is omitted. The
-fields omitted from `DETERMINISTIC` are provider/model/process/prompt/system,
-sampling, tool-context, raw-output, retry, reviewer, review-process, and
-acceptance fields. The fields omitted from `HUMAN` are provider/model/process,
-prompt/system, sampling, tool-context, raw-output, retry, and acceptance
-fields. `MIXED` includes the exact union shown above, with no other key. A
+`toolParticipation` is required and non-null in `MODEL_ASSISTED` and `MIXED`.
+When it is `USED`, `toolContextHash` is required, non-null, and must satisfy
+the existing lowercase hash domain. When it is `NOT_USED`, `toolContextHash`
+must be absent; JSON null and placeholder hashes are invalid. Historical
+verification determines this conditional from the authenticated persisted
+`toolParticipation` value, never from `toolContextHash` presence. Missing,
+null, unsupported, or inconsistent values fail through the existing
+structural/method-authority failure precedence; no new failure enum is added.
+The fields omitted from `DETERMINISTIC` are provider/model/process/prompt/system,
+sampling, tool-participation, tool-context, raw-output, retry, reviewer,
+review-process, and acceptance fields. The fields omitted from `HUMAN` are
+provider/model/process, prompt/system, sampling, tool-participation,
+tool-context, raw-output, retry, and acceptance fields. `MIXED` includes the
+exact union shown above, with no other key. A
 human disagreement or override is a new Assessment; an existing Assessment
 is never mutated.
 
@@ -568,11 +584,19 @@ Same-class tie-breaking must be independent of database row order.
 Readers and verifiers perform no INSERT, UPDATE, DELETE, normalization repair,
 reinterpretation repair, hash repair, or authority repair. Invalid persisted
 semantic authority remains invalid.
+An invalid historical `methodProvenance` cannot be repaired by adding or
+changing `toolParticipation`, adding or removing `toolContextHash`, or
+rewriting the embedded object; a corrected provenance declaration requires a
+new immutable EvidenceAssessment authority.
 
 Historical verification uses explicit immutable authority only. Forbidden
 substitutes include current ClaimVersion rows without Claim Historical
 Authority, current models, parsers, matchers, source metadata, RCV-021
 Operation/Run state, Scheduler state, and current normalization behavior.
+For `MODEL_ASSISTED` and `MIXED`, historical validation uses the persisted
+canonical `toolParticipation` value and the corresponding `toolContextHash`
+presence/absence rule; it does not reconstruct tool use from current runtime,
+provider, model, or tool state.
 
 ## 15. Downstream boundary and North Star
 
