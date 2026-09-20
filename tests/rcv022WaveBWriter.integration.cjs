@@ -6,6 +6,7 @@ const crypto = require("node:crypto");
 const { Pool } = require("pg");
 const c = require("../dist/services/rcv022Canonical");
 const w = require("../dist/services/rcv022Writer");
+const { canonicalizeJson } = require("../dist/services/canonicalJson");
 
 const database = process.env.RCV022_WAVE_B_DATABASE;
 const enabled = Boolean(database && process.env.PGHOST && process.env.PGPORT);
@@ -119,7 +120,8 @@ test("Wave B2 Match and Assessment authority proof", { concurrency: false }, asy
   for (const [index, [label, change]] of assessmentDependencyCases.entries()) {
     await assert.rejects(() => tx({ ...bundle, assessment: { ...bundle.assessment, assessmentId: id(520 + index), ...change }, envelope: { ...bundle.envelope, matchRefs: [], assessmentRefs: [] } }), /HASH_MISMATCH|canonicalVersion 1/, label);
   }
-  const modelAssessment = { ...bundle.assessment, assessmentId: "81000000-0000-4000-8000-000000000515", methodProvenance: { methodType: "MODEL_ASSISTED", methodIdentity: "model", methodVersion: "1", methodHash: "a".repeat(64), providerIdentity: "provider", modelIdentity: "model", modelVersion: "1", processIdentity: "process", processVersion: "1", processHash: "b".repeat(64), promptTemplateHash: "c".repeat(64), systemInstructionHash: "d".repeat(64), samplingParameters: { schema: "factbase-rcv022-sampling-parameters", canonicalVersion: 1, entries: [{ name: "temperature", value: 0 }] }, samplingParametersHash: "e".repeat(64), inputCanonicalHashes: [], rawOutputHash: "a".repeat(64), structuredOutputHash: "b".repeat(64), retryIdentity: "retry", reviewStatus: "NOT_REVIEWED", toolParticipation: "USED", toolContextHash: "c".repeat(64) } };
+  const modelSamplingParameters = { schema: "factbase-rcv022-sampling-parameters", canonicalVersion: 1, entries: [{ name: "temperature", value: 0 }] };
+  const modelAssessment = { ...bundle.assessment, assessmentId: "81000000-0000-4000-8000-000000000515", methodProvenance: { methodType: "MODEL_ASSISTED", methodIdentity: "model", methodVersion: "1", methodHash: "a".repeat(64), providerIdentity: "provider", modelIdentity: "model", modelVersion: "1", processIdentity: "process", processVersion: "1", processHash: "b".repeat(64), promptTemplateHash: "c".repeat(64), systemInstructionHash: "d".repeat(64), samplingParameters: modelSamplingParameters, samplingParametersHash: hashText(canonicalizeJson(modelSamplingParameters)), inputCanonicalHashes: [], rawOutputHash: "a".repeat(64), structuredOutputHash: "b".repeat(64), retryIdentity: "retry", reviewStatus: "NOT_REVIEWED", toolParticipation: "USED", toolContextHash: "c".repeat(64) } };
   const modelClient = await pool.connect();
   try { await modelClient.query("BEGIN"); await w.persistEvidenceAssessmentWithinTransaction(modelClient, modelAssessment); await modelClient.query("COMMIT"); } finally { modelClient.release(); }
   assert.equal((await pool.query("SELECT method_provenance->>'toolParticipation' AS participation,method_provenance->>'toolContextHash' AS context_hash FROM public.rcv022_evidence_assessments WHERE assessment_id=$1", [modelAssessment.assessmentId])).rows[0].participation, "USED");
