@@ -83,7 +83,12 @@ function validateExtraction(value: unknown, path = "extractionAuthority"): Recor
 }
 
 export function validateLocatorAndContentBinding(value: { locator: unknown; contentBinding: unknown; fragmentKind: string; captureRepresentationHash: string }): void {
-  validateLocator(value.locator, value.fragmentKind); validateContentBinding(value.contentBinding, value.fragmentKind, value.captureRepresentationHash);
+  const locator = validateLocator(value.locator, value.fragmentKind);
+  const binding = validateContentBinding(value.contentBinding, value.fragmentKind, value.captureRepresentationHash);
+  if (locator.kind === "UTF8_BYTE_RANGE") {
+    const byteLength = Buffer.byteLength(String(binding.utf8Text), "utf8");
+    if ((locator.endByteExclusive as number) > byteLength) fail("locator", "byte range exceeds authenticated UTF-8 content length");
+  }
 }
 
 function validateSampling(value: unknown): Record<string, unknown> {
