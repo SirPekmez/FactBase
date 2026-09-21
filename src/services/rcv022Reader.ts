@@ -264,8 +264,29 @@ async function verifyEnvelope(client: Rcv022ReadClient, id: string): Promise<{ r
   const mr = await many(client,"SELECT ordinal, match_id::text AS id, match_canonical_version AS canonical_version, match_canonical_hash AS canonical_hash FROM public.rcv022_envelope_match_refs WHERE envelope_id=$1 ORDER BY ordinal",[id]); const ar = await many(client,"SELECT ordinal, assessment_id::text AS id, assessment_canonical_version AS canonical_version, assessment_canonical_hash AS canonical_hash FROM public.rcv022_envelope_assessment_refs WHERE envelope_id=$1 ORDER BY ordinal",[id]);
   const checkRefs = (refs: readonly Record<string,unknown>[], canonicalRefs: unknown, name: string) => { if (!Array.isArray(canonicalRefs) || refs.length !== canonicalRefs.length) { failures.push({ code: "LINEAGE_MISMATCH", path: `semanticAnalysisEnvelope.${name}`, message: "support projection cardinality mismatch" }); return; } for (const [i,ref] of refs.entries()) { const expected=(canonicalRefs as readonly Record<string,unknown>[])[i]; for (const [actual, wanted, path, code] of [[ref.ordinal,i,`${name}[${i}].ordinal`,`LINEAGE_MISMATCH`],[ref.id,expected.id,`${name}[${i}].id`,`LINEAGE_MISMATCH`],[ref.canonical_version,expected.canonicalVersion,`${name}[${i}].canonical_version`,`LINEAGE_MISMATCH`],[ref.canonical_hash,expected.canonicalHash,`${name}[${i}].canonical_hash`,`HASH_MISMATCH`]] as const) { const failure = captureFailure(() => compare(actual,wanted,path,code)); if (failure) failures.push(failure); } } };
   checkRefs(mr,p.matchRefs,"matchRefs"); checkRefs(ar,p.assessmentRefs,"assessmentRefs");
-  for (const ref of p.matchRefs as readonly Record<string,unknown>[]) { const failure = await captureAsyncFailure(() => verifyMatch(client,text(ref.id))); if (failure) failures.push(failure); }
-  for (const ref of p.assessmentRefs as readonly Record<string,unknown>[]) { const result = await captureAsyncFailure(async () => { const assessment = await verifyAssessment(client,text(ref.id)); const matchId = text(assessment.claim_evidence_match_id); const count = (p.matchRefs as readonly Record<string,unknown>[]).filter((m) => text(m.id) === matchId).length; if (count !== 1) fail("LINEAGE_MISMATCH",`semanticAnalysisEnvelope.assessmentRefs.${ref.id}`,"Assessment Match is not present exactly once in this Envelope"); }); if (result) failures.push(result); }
+  for (const ref of p.matchRefs as readonly Record<string,unknown>[]) {
+    const failure = await captureAsyncFailure(async () => {
+      const match = await verifyMatch(client,text(ref.id));
+      compare(ref.canonicalVersion, match.canonical_version, `semanticAnalysisEnvelope.matchRefs.${ref.id}.canonicalVersion`, "LINEAGE_MISMATCH");
+      compare(ref.canonicalHash, match.canonical_hash, `semanticAnalysisEnvelope.matchRefs.${ref.id}.canonicalHash`, "HASH_MISMATCH");
+      compare(match.claim_id, p.claimId, `semanticAnalysisEnvelope.matchRefs.${ref.id}.claimId`, "CLAIM_SCOPE_MISMATCH");
+      compare(match.claim_version_id, p.claimVersionId, `semanticAnalysisEnvelope.matchRefs.${ref.id}.claimVersionId`, "CLAIM_SCOPE_MISMATCH");
+    });
+    if (failure) failures.push(failure);
+  }
+  for (const ref of p.assessmentRefs as readonly Record<string,unknown>[]) {
+    const result = await captureAsyncFailure(async () => {
+      const assessment = await verifyAssessment(client,text(ref.id));
+      compare(ref.canonicalVersion, assessment.canonical_version, `semanticAnalysisEnvelope.assessmentRefs.${ref.id}.canonicalVersion`, "LINEAGE_MISMATCH");
+      compare(ref.canonicalHash, assessment.canonical_hash, `semanticAnalysisEnvelope.assessmentRefs.${ref.id}.canonicalHash`, "HASH_MISMATCH");
+      compare(assessment.claim_id, p.claimId, `semanticAnalysisEnvelope.assessmentRefs.${ref.id}.claimId`, "CLAIM_SCOPE_MISMATCH");
+      compare(assessment.claim_version_id, p.claimVersionId, `semanticAnalysisEnvelope.assessmentRefs.${ref.id}.claimVersionId`, "CLAIM_SCOPE_MISMATCH");
+      const matchId = text(assessment.claim_evidence_match_id);
+      const count = (p.matchRefs as readonly Record<string,unknown>[]).filter((m) => text(m.id) === matchId).length;
+      if (count !== 1) fail("LINEAGE_MISMATCH",`semanticAnalysisEnvelope.assessmentRefs.${ref.id}`,"Assessment Match is not present exactly once in this Envelope");
+    });
+    if (result) failures.push(result);
+  }
   throwSelected(failures);
   return { row, matchRefs: mr, assessmentRefs: ar };
 }
