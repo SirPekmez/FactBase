@@ -248,7 +248,20 @@ async function verifyAssessment(client: Rcv022ReadClient, id: string): Promise<R
   const inspected = inspectIndependentCanonical(row, validateAssessmentShape, "evidenceAssessment"); const failures: Rcv022FailureCandidate[] = [...inspected.failures]; if (!inspected.parsed) { throwSelected(failures); } const p = inspected.parsed as Record<string, unknown>;
   for (const [column,key] of [["canonical_version","canonicalVersion"],["assessment_id","assessmentId"],["claim_evidence_match_id","claimEvidenceMatchId"],["claim_evidence_match_canonical_version","claimEvidenceMatchCanonicalVersion"],["claim_evidence_match_canonical_hash","claimEvidenceMatchCanonicalHash"],["claim_id","claimId"],["claim_canonical_version","claimCanonicalVersion"],["claim_canonical_hash","claimCanonicalHash"],["claim_version_id","claimVersionId"],["claim_version_canonical_version","claimVersionCanonicalVersion"],["claim_version_canonical_hash","claimVersionCanonicalHash"],["evidence_fragment_id","evidenceFragmentId"],["evidence_fragment_canonical_version","evidenceFragmentCanonicalVersion"],["evidence_fragment_canonical_hash","evidenceFragmentCanonicalHash"],["assessment_result","assessmentResult"],["method_provenance","methodProvenance"],["assessed_at","assessedAt"]] as const) { const failure = captureFailure(() => compare(row[column],p[key],`evidenceAssessment.${column}`,"LINEAGE_MISMATCH")); if (failure) failures.push(failure); }
   for (const [actual, expected, path, code] of [[row.relation,(p.assessmentResult as Record<string,unknown>).relation,"evidenceAssessment.relation","INVALID_RELATION"],[row.method_type,(p.methodProvenance as Record<string,unknown>).methodType,"evidenceAssessment.method_type","METHOD_AUTHORITY_MISMATCH"]] as const) { const failure = captureFailure(() => compare(actual, expected, path, code)); if (failure) failures.push(failure); }
-  for (const action of [() => verifyMatch(client,text(p.claimEvidenceMatchId)), () => authenticateClaim(client,text(p.claimId),p.claimCanonicalVersion,p.claimCanonicalHash,"evidenceAssessment.claim"), () => authenticateClaimVersion(client,text(p.claimVersionId),p.claimVersionCanonicalVersion,p.claimVersionCanonicalHash,"evidenceAssessment.claimVersion"), () => verifyFragment(client,text(p.evidenceFragmentId))]) { const failure = await captureAsyncFailure(action); if (failure) failures.push(failure); }
+  const matchFailure = await captureAsyncFailure(async () => {
+    const match = await verifyMatch(client, text(p.claimEvidenceMatchId));
+    compare(row.claim_id, match.claim_id, "evidenceAssessment.claim_id", "CLAIM_SCOPE_MISMATCH");
+    compare(row.claim_canonical_version, match.claim_canonical_version, "evidenceAssessment.claim_canonical_version", "CLAIM_SCOPE_MISMATCH");
+    compare(row.claim_canonical_hash, match.claim_canonical_hash, "evidenceAssessment.claim_canonical_hash", "CLAIM_SCOPE_MISMATCH");
+    compare(row.claim_version_id, match.claim_version_id, "evidenceAssessment.claim_version_id", "CLAIM_SCOPE_MISMATCH");
+    compare(row.claim_version_canonical_version, match.claim_version_canonical_version, "evidenceAssessment.claim_version_canonical_version", "CLAIM_SCOPE_MISMATCH");
+    compare(row.claim_version_canonical_hash, match.claim_version_canonical_hash, "evidenceAssessment.claim_version_canonical_hash", "CLAIM_SCOPE_MISMATCH");
+    compare(row.evidence_fragment_id, match.evidence_fragment_id, "evidenceAssessment.evidence_fragment_id", "LINEAGE_MISMATCH");
+    compare(row.evidence_fragment_canonical_version, match.evidence_fragment_canonical_version, "evidenceAssessment.evidence_fragment_canonical_version", "LINEAGE_MISMATCH");
+    compare(row.evidence_fragment_canonical_hash, match.evidence_fragment_canonical_hash, "evidenceAssessment.evidence_fragment_canonical_hash", "HASH_MISMATCH");
+  });
+  if (matchFailure) failures.push(matchFailure);
+  for (const action of [() => authenticateClaim(client,text(p.claimId),p.claimCanonicalVersion,p.claimCanonicalHash,"evidenceAssessment.claim"), () => authenticateClaimVersion(client,text(p.claimVersionId),p.claimVersionCanonicalVersion,p.claimVersionCanonicalHash,"evidenceAssessment.claimVersion"), () => verifyFragment(client,text(p.evidenceFragmentId))]) { const failure = await captureAsyncFailure(action); if (failure) failures.push(failure); }
   throwSelected(failures);
   return row;
 }
