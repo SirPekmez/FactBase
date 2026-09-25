@@ -6,8 +6,10 @@ const { Pool } = require("pg");
 
 const {
   ClaimLevelEvidenceViewInputError,
+  getClaimLevelEvidenceView,
   prepareClaimLevelEvidenceViewSpec,
 } = require("../dist/services/claimLevelEvidenceView");
+const { buildClaimIdentityCanonical, buildClaimVersionCanonical } = require("../dist/services/claimHistoricalAuthorityCanonical");
 
 const CLAIM_VERSION_ID = "11111111-1111-4111-8111-111111111111";
 const ENVELOPE_A = "22222222-2222-4222-8222-222222222222";
@@ -166,10 +168,86 @@ test("Wave A has no database or dynamic Envelope discovery path", () => {
     path.join(__dirname, "..", "src", "services", "claimLevelEvidenceView.ts"),
     "utf8",
   );
-  const executableSource = source
+  const waveASource = source.slice(
+    source.indexOf("const CLAIM_LEVEL_EVIDENCE_VIEW_CONTRACT_VERSION"),
+    source.indexOf("export type ClaimLevelEvidenceViewVerificationCode"),
+  );
+  const executableSource = waveASource
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/\/\/.*$/gm, "");
   assert.doesNotMatch(executableSource, /Pool|client|query|\bSELECT\s|\bFROM\s+public|database/i);
   assert.doesNotMatch(executableSource, /latest|cutoff|trusted|approved|scheduler|current/i);
   assert.doesNotMatch(executableSource, /rcv022Reader|rcv022Writer|AssessmentManifest|OccurrenceManifest/i);
+});
+
+test("Wave B authenticates an empty explicit scope before returning its real result", async () => {
+  const claimId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const versionId = CLAIM_VERSION_ID;
+  const claim = buildClaimIdentityCanonical({ claimId });
+  const version = buildClaimVersionCanonical({
+    claimId,
+    claimVersionId: versionId,
+    versionNumber: 1,
+    title: "Golden claim",
+    normalizedStatement: "A historically authenticated claim",
+    language: "en",
+    claimType: "fact",
+  });
+  const queries = [];
+  let released = false;
+  const client = {
+    async query(text, values = []) {
+      queries.push({ text, values });
+      if (text.startsWith("BEGIN")) return { rows: [] };
+      if (text.startsWith("COMMIT")) return { rows: [] };
+      if (text.includes("FROM public.claim_version_authorities")) {
+        return { rows: [{
+          claim_version_id: versionId,
+          claim_id: claimId,
+          version_number: 1,
+          title: "Golden claim",
+          normalized_statement: "A historically authenticated claim",
+          language: "en",
+          claim_type: "fact",
+          canonical_version: 1,
+          canonical: version.canonical,
+          canonical_hash: version.hash,
+        }] };
+      }
+      if (text.includes("FROM public.claim_identity_authorities")) {
+        return { rows: [{ claim_id: claimId, canonical_version: 1, canonical: claim.canonical, canonical_hash: claim.hash }] };
+      }
+      throw new Error(`unexpected query: ${text}`);
+    },
+    release() { released = true; },
+  };
+  const result = await getClaimLevelEvidenceView({
+    claimVersionRef: { claimVersionId: versionId, canonicalVersion: 1, canonicalHash: version.hash },
+    envelopeManifest: [],
+    contractVersion: 1,
+  }, { connect: async () => client });
+  assert.deepEqual(result.assessmentManifest, []);
+  assert.deepEqual(result.occurrenceManifest, []);
+  assert.deepEqual(result.envelopeProvenance, []);
+  assert.deepEqual(result.scopeEnumeration, { scopeKind: "EXPLICIT_ENVELOPE_SET", status: "ENUMERATED_AND_CONSIDERED" });
+  assert.equal(queries[0].text, "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+  assert.equal(queries.at(-1).text, "COMMIT");
+  assert.equal(released, true);
+});
+
+test("Wave B rejects malformed scope before acquiring a pool client", async () => {
+  let connects = 0;
+  await assert.rejects(
+    () => getClaimLevelEvidenceView({ envelopeManifest: [], contractVersion: 1 }, { connect: async () => { connects += 1; throw new Error("must not connect"); } }),
+    (error) => error instanceof ClaimLevelEvidenceViewInputError && error.code === "MALFORMED_VIEW_SPEC",
+  );
+  assert.equal(connects, 0);
+});
+
+test("Wave B production path is exact-ID SELECT-only and does not import RCV-022 semantic oracles", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "services", "claimLevelEvidenceView.ts"), "utf8");
+  assert.doesNotMatch(source, /rcv022Reader|rcv022Writer/);
+  assert.doesNotMatch(source, /\b(?:UPDATE|INSERT|DELETE)\b/);
+  assert.doesNotMatch(source, /SELECT\s+\*\s+FROM\s+public\.rcv022_(?:semantic_analysis_envelopes|evidence_assessments)/i);
+  assert.doesNotMatch(source, /latest|trusted|approved|all\s+Envelopes|cutoff\s+selection|NOW\s*\(/i);
 });
