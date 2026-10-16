@@ -418,6 +418,16 @@ function queryInt4(value: unknown, path: string, minimum: number): number {
   return Number(value);
 }
 
+// Membership query identity/hash fields must be stable own data values.
+// Inspect the descriptor once; do not execute a getter or re-read the raw field.
+function membershipDataValue(membership: Row, key: "id" | "canonical_hash", path: string): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(membership, key);
+  if (!descriptor || !("value" in descriptor)) {
+    verifyFail("MALFORMED_DATA", path, "expected own data property");
+  }
+  return descriptor.value;
+}
+
 function compareValue(actual: unknown, expected: unknown, path: string, code: ClaimLevelEvidenceViewVerificationCode = "LINEAGE_MISMATCH"): void {
   if (typeof actual === "object" || typeof expected === "object") {
     let actualCanonical: string;
@@ -684,23 +694,36 @@ async function authenticateEnvelope(client: ClaimLevelEvidenceViewReadClient, re
   ] as const) compareValue(actual, expected, path);
   const matchRefs = await many(client, "SELECT ordinal, match_id::text AS id, match_canonical_version AS canonical_version, match_canonical_hash AS canonical_hash FROM public.rcv022_envelope_match_refs WHERE envelope_id=$1 ORDER BY ordinal", [ref.envelopeId]);
   const assessmentRefs = await many(client, "SELECT ordinal, assessment_id::text AS id, assessment_canonical_version AS canonical_version, assessment_canonical_hash AS canonical_hash FROM public.rcv022_envelope_assessment_refs WHERE envelope_id=$1 ORDER BY ordinal", [ref.envelopeId]);
-  const checkMembership = (rows: readonly Row[], canonicalRefs: unknown, path: string): void => {
+  const checkMembership = (rows: readonly Row[], canonicalRefs: unknown, path: string): readonly { membership: Row; id: string; canonicalHash: string }[] => {
     if (!Array.isArray(canonicalRefs) || rows.length !== canonicalRefs.length) verifyFail("LINEAGE_MISMATCH", path, "membership projection cardinality mismatch");
-    rows.forEach((membership, ordinal) => { const expected = asObject((canonicalRefs as readonly unknown[])[ordinal], `${path}[${ordinal}]`); compareValue(queryInt4(membership.ordinal, `${path}[${ordinal}].ordinal`, 0), ordinal, `${path}[${ordinal}].ordinal`); compareValue(membership.id, expected.id, `${path}[${ordinal}].id`); compareValue(assertVersion(membership.canonical_version, `${path}[${ordinal}].canonicalVersion`), expected.canonicalVersion, `${path}[${ordinal}].canonicalVersion`); compareValue(membership.canonical_hash, expected.canonicalHash, `${path}[${ordinal}].canonicalHash`, "HASH_MISMATCH"); });
+    const checked: { membership: Row; id: string; canonicalHash: string }[] = [];
+    for (let ordinal = 0; ordinal < canonicalRefs.length; ordinal += 1) {
+      const membership = asObject(rows[ordinal], `${path}[${ordinal}]`);
+      const expected = asObject((canonicalRefs as readonly unknown[])[ordinal], `${path}[${ordinal}]`);
+      compareValue(queryInt4(membership.ordinal, `${path}[${ordinal}].ordinal`, 0), ordinal, `${path}[${ordinal}].ordinal`);
+      const id = assertUuid(membershipDataValue(membership, "id", `${path}[${ordinal}].id`), `${path}[${ordinal}].id`);
+      compareValue(id, expected.id, `${path}[${ordinal}].id`);
+      compareValue(assertVersion(membership.canonical_version, `${path}[${ordinal}].canonicalVersion`), expected.canonicalVersion, `${path}[${ordinal}].canonicalVersion`);
+      const canonicalHash = assertHash(membershipDataValue(membership, "canonical_hash", `${path}[${ordinal}].canonicalHash`), `${path}[${ordinal}].canonicalHash`);
+      compareValue(canonicalHash, expected.canonicalHash, `${path}[${ordinal}].canonicalHash`, "HASH_MISMATCH");
+      checked.push({ membership, id, canonicalHash });
+    }
+    return checked;
   };
-  checkMembership(matchRefs, parsed.matchRefs, "matchRefs"); checkMembership(assessmentRefs, parsed.assessmentRefs, "assessmentRefs");
+  const verifiedMatchRefs = checkMembership(matchRefs, parsed.matchRefs, "matchRefs");
+  const verifiedAssessmentRefs = checkMembership(assessmentRefs, parsed.assessmentRefs, "assessmentRefs");
   const matchIds = new Set<string>();
-  for (const membership of matchRefs) {
-    const match = await authenticateMatch(client, asText(membership.id, "matchRefs.id"), target, targetClaimId, targetClaimCanonicalHash, matchCache, fragmentCache);
-    compareValue(membership.id, match.ref.matchId, `matchRefs.${match.ref.matchId}.id`, "IDENTITY_MISMATCH");
+  for (const { membership, id, canonicalHash } of verifiedMatchRefs) {
+    const match = await authenticateMatch(client, id, target, targetClaimId, targetClaimCanonicalHash, matchCache, fragmentCache);
+    compareValue(id, match.ref.matchId, `matchRefs.${match.ref.matchId}.id`, "IDENTITY_MISMATCH");
     compareValue(assertVersion(membership.canonical_version, `matchRefs.${match.ref.matchId}.canonicalVersion`), match.ref.canonicalVersion, `matchRefs.${match.ref.matchId}.canonicalVersion`, "LINEAGE_MISMATCH");
-    compareValue(membership.canonical_hash, match.ref.canonicalHash, `matchRefs.${match.ref.matchId}.canonicalHash`, "HASH_MISMATCH");
+    compareValue(canonicalHash, match.ref.canonicalHash, `matchRefs.${match.ref.matchId}.canonicalHash`, "HASH_MISMATCH");
     matchIds.add(match.ref.matchId);
     compareValue(match.parsed.claimVersionId, target.claimVersionId, `matchRefs.${match.ref.matchId}.claimVersionId`, "CLAIM_SCOPE_MISMATCH");
   }
   const occurrences: AssessmentOccurrence[] = []; const assessments: AuthenticatedAssessment[] = [];
-  for (const membership of assessmentRefs) {
-    const id = asText(membership.id, "assessmentRefs.id"); const assessment = assessmentCache.get(id) ?? await authenticateAssessment(client, id, target, targetClaimId, targetClaimCanonicalHash, matchCache, fragmentCache); assessmentCache.set(id, assessment); if (!matchIds.has(assessment.match.ref.matchId)) verifyFail("LINEAGE_MISMATCH", `assessmentRefs.${id}`, "Assessment Match is not an authenticated Envelope member"); compareValue(assertVersion(membership.canonical_version, `assessmentRefs.${id}.canonicalVersion`), assessment.row.canonical_version, `assessmentRefs.${id}.canonicalVersion`); compareValue(membership.canonical_hash, assessment.row.canonical_hash, `assessmentRefs.${id}.canonicalHash`, "HASH_MISMATCH"); occurrences.push({ envelopeRef: ref, assessmentRef: assessment.ref, ordinal: queryInt4(membership.ordinal, "assessmentRefs.ordinal", 0) }); assessments.push(assessment);
+  for (const { membership, id, canonicalHash } of verifiedAssessmentRefs) {
+    const assessment = assessmentCache.get(id) ?? await authenticateAssessment(client, id, target, targetClaimId, targetClaimCanonicalHash, matchCache, fragmentCache); assessmentCache.set(id, assessment); if (!matchIds.has(assessment.match.ref.matchId)) verifyFail("LINEAGE_MISMATCH", `assessmentRefs.${id}`, "Assessment Match is not an authenticated Envelope member"); compareValue(assertVersion(membership.canonical_version, `assessmentRefs.${id}.canonicalVersion`), assessment.row.canonical_version, `assessmentRefs.${id}.canonicalVersion`); compareValue(canonicalHash, assessment.row.canonical_hash, `assessmentRefs.${id}.canonicalHash`, "HASH_MISMATCH"); occurrences.push({ envelopeRef: ref, assessmentRef: assessment.ref, ordinal: queryInt4(membership.ordinal, "assessmentRefs.ordinal", 0) }); assessments.push(assessment);
   }
   return { provenance: Object.freeze({ envelopeRef: ref, claimVersionRef: target, analysisCutoffAt: input.analysisCutoffAt, analysisAt: input.analysisAt, analysisMethodIdentity: input.analysisMethodIdentity, analysisMethodVersion: input.analysisMethodVersion, analysisMethodHash: input.analysisMethodHash }), occurrences, assessments };
 }

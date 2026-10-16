@@ -612,3 +612,141 @@ for (const [label, table, prefix] of [
     });
   });
 }
+
+
+// ID/hash probes retain the raw Row at the existing query boundary.
+function alternateMembershipAuthority(harness, label) {
+  const { buildClaimEvidenceMatchCanonical, buildEvidenceAssessmentCanonical } = require("../dist/services/rcv022Canonical");
+  const table = label === "Match" ? "rcv022_claim_evidence_matches" : "rcv022_evidence_assessments";
+  const { schema, ...input } = JSON.parse(harness.rows[table].canonical);
+  const key = label === "Match" ? "matchId" : "assessmentId";
+  input[key] = label === "Match" ? "85000000-0000-4000-8000-000000000200" : "85000000-0000-4000-8000-000000000300";
+  const built = label === "Match" ? buildClaimEvidenceMatchCanonical(input) : buildEvidenceAssessmentCanonical(input);
+  return { id: input[key], canonicalHash: built.hash };
+}
+
+function assertMembershipRawDelivery(harness, table, row = harness.rows[table]) {
+  const delivered = harness.deliveries.filter(item => item.table === table);
+  assert.equal(delivered.length, 1);
+  assert.strictEqual(delivered[0].row, row);
+}
+
+async function rejectMembershipIdentity(harness, path, code = "MALFORMED_DATA") {
+  let returned = false;
+  await assert.rejects(async () => { const result = await harness.run(); returned = true; return result; }, error => {
+    assert.equal(error.code, code);
+    assert.equal(error.path, path);
+    return true;
+  });
+  assert.equal(returned, false);
+  assertNarrowRejectedCleanup(harness);
+}
+
+function assertMembershipIdentityControl(harness, result) {
+  assert.equal(result.envelopeManifest.length, 1);
+  assert.equal(result.assessmentManifest.length, 1);
+  assert.equal(result.occurrenceManifest.length, 1);
+  assert.equal(result.assessmentManifest[0].assessmentRef.assessmentId, harness.rows.rcv022_evidence_assessments.assessment_id);
+  assert.equal(result.assessmentManifest[0].claimEvidenceMatchRef.matchId, harness.rows.rcv022_claim_evidence_matches.match_id);
+  assert.equal(harness.calls.filter(sql => sql === "COMMIT").length, 1);
+  assert.equal(harness.calls.includes("ROLLBACK"), false);
+  assert.equal(harness.calls.filter(sql => sql === "RELEASE").length, 1);
+}
+
+for (const [label, table, prefix] of [
+  ["Match", "rcv022_envelope_match_refs", "matchRefs"],
+  ["Assessment", "rcv022_envelope_assessment_refs", "assessmentRefs"],
+]) {
+  test(`Membership ID/hash ${label}`, async t => {
+    await t.test("stable own data control", async () => {
+      const harness = narrowTypeHarness();
+      const result = await harness.run();
+      assertMembershipRawDelivery(harness, table);
+      assertMembershipIdentityControl(harness, result);
+    });
+    await t.test("function hash with valid toString is rejected without coercion", async () => {
+      const harness = narrowTypeHarness();
+      const expectedHash = harness.rows[table].canonical_hash;
+      let conversions = 0;
+      const injected = function hashValue() {};
+      injected.toString = () => { conversions += 1; return expectedHash; };
+      harness.rows[table].canonical_hash = injected;
+      await rejectMembershipIdentity(harness, `${prefix}[0].canonicalHash`);
+      assertMembershipRawDelivery(harness, table);
+      assert.strictEqual(harness.rows[table].canonical_hash, injected);
+      assert.equal(conversions, 0);
+    });
+    const template = narrowTypeHarness().rows[table];
+    for (const [field, path, cases] of [
+      ["id", "id", [["number", 1], ["null", null], ["undefined", undefined], ["array", [template.id]], ["boxed text", new String(template.id)], ["bad format", "not-a-uuid"], ["uppercase UUID", "A" + template.id.slice(1)]]],
+      ["canonical_hash", "canonicalHash", [["number", 1], ["null", null], ["undefined", undefined], ["array", [template.canonical_hash]], ["boxed text", new String(template.canonical_hash)], ["bad length", template.canonical_hash.slice(1)], ["uppercase hash", "A" + template.canonical_hash.slice(1)]]],
+    ]) {
+      for (const [name, injected] of cases) {
+        await t.test(`${field}: ${name}`, async () => {
+          const harness = narrowTypeHarness({ table, field, value: injected });
+          await rejectMembershipIdentity(harness, `${prefix}[0].${path}`);
+          const delivered = harness.deliveries.filter(item => item.table === table);
+          assert.equal(delivered.length, 1);
+          assert.strictEqual(delivered[0].row[field], injected);
+        });
+      }
+    }
+    await t.test("function ID with valid toString is rejected without coercion", async () => {
+      const harness = narrowTypeHarness();
+      const expectedId = harness.rows[table].id;
+      let conversions = 0;
+      const injected = function idValue() {};
+      injected.toString = () => { conversions += 1; return expectedId; };
+      harness.rows[table].id = injected;
+      await rejectMembershipIdentity(harness, `${prefix}[0].id`);
+      assertMembershipRawDelivery(harness, table);
+      assert.equal(conversions, 0);
+    });
+    for (const field of ["id", "canonical_hash", "both"]) {
+      await t.test(`switching authority getter: ${field}`, async () => {
+        const harness = narrowTypeHarness();
+        const row = harness.rows[table];
+        const original = { id: row.id, canonical_hash: row.canonical_hash };
+        const alternate = alternateMembershipAuthority(harness, label);
+        const next = { id: alternate.id, canonical_hash: alternate.canonicalHash };
+        assert.notEqual(original.id, next.id);
+        assert.notEqual(original.canonical_hash, next.canonical_hash);
+        const reads = { id: 0, canonical_hash: 0 };
+        const getters = {};
+        for (const key of field === "both" ? ["id", "canonical_hash"] : [field]) {
+          getters[key] = () => { reads[key] += 1; return reads[key] === 1 ? original[key] : next[key]; };
+          Object.defineProperty(row, key, { enumerable: true, configurable: true, get: getters[key] });
+        }
+        await rejectMembershipIdentity(harness, `${prefix}[0].${field === "canonical_hash" ? "canonicalHash" : "id"}`);
+        assertMembershipRawDelivery(harness, table, row);
+        assert.deepEqual(reads, { id: 0, canonical_hash: 0 });
+        for (const [key, getter] of Object.entries(getters)) assert.strictEqual(Object.getOwnPropertyDescriptor(row, key).get, getter);
+      });
+    }
+    for (const field of ["id", "canonical_hash"]) {
+      await t.test(`checked descriptor values only: ${field}`, async () => {
+        const harness = narrowTypeHarness();
+        const target = harness.rows[table];
+        const descriptors = { id: 0, canonical_hash: 0 };
+        let rawReads = 0;
+        const forbidden = new Error(`FORBIDDEN_RAW_MEMBERSHIP_READ:${label}:${field}`);
+        const row = new Proxy(target, {
+          getOwnPropertyDescriptor(object, key) {
+            if (key === "id" || key === "canonical_hash") descriptors[key] += 1;
+            return Reflect.getOwnPropertyDescriptor(object, key);
+          },
+          get(object, key, receiver) {
+            if (key === field) { rawReads += 1; throw forbidden; }
+            return Reflect.get(object, key, receiver);
+          },
+        });
+        harness.rows[table] = row;
+        const result = await harness.run();
+        assertMembershipRawDelivery(harness, table, row);
+        assert.deepEqual(descriptors, { id: 1, canonical_hash: 1 });
+        assert.equal(rawReads, 0);
+        assertMembershipIdentityControl(harness, result);
+      });
+    }
+  });
+}
