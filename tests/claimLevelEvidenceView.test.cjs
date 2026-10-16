@@ -251,3 +251,144 @@ test("Wave B production path is exact-ID SELECT-only and does not import RCV-022
   assert.doesNotMatch(source, /SELECT\s+\*\s+FROM\s+public\.rcv022_(?:semantic_analysis_envelopes|evidence_assessments)/i);
   assert.doesNotMatch(source, /latest|trusted|approved|all\s+Envelopes|cutoff\s+selection|NOW\s*\(/i);
 });
+
+// Isolated HEAD probes: fixtures use only dependencies present in the base commit.
+let isolatedHeadDatabaseAttempts = 0;
+test.before(() => {
+  const { Client } = require("pg");
+  const blockDatabase = () => {
+    isolatedHeadDatabaseAttempts += 1;
+    process.exitCode = 1;
+    throw new Error("isolated HEAD unit probes must not access PostgreSQL");
+  };
+  Pool.prototype.connect = blockDatabase;
+  Pool.prototype.query = blockDatabase;
+  Client.prototype.connect = blockDatabase;
+  Client.prototype.query = blockDatabase;
+});
+test.after(t => {
+  assert.equal(isolatedHeadDatabaseAttempts, 0);
+  t.diagnostic("isolated HEAD PostgreSQL access attempts: 0");
+});
+
+function isolatedHeadMembershipHarness(injectedTable, injectedResponse) {
+  const claimId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const claim = buildClaimIdentityCanonical({ claimId });
+  const versionInput = {
+    claimId, claimVersionId: CLAIM_VERSION_ID, versionNumber: 1,
+    title: "Golden claim", normalizedStatement: "A historically authenticated claim",
+    language: "en", claimType: "fact",
+  };
+  const version = buildClaimVersionCanonical(versionInput);
+  const envelopeInput = {
+    envelopeId: ENVELOPE_A, claimId, claimCanonicalVersion: 1,
+    claimCanonicalHash: claim.hash, claimVersionId: CLAIM_VERSION_ID,
+    claimVersionCanonicalVersion: 1, claimVersionCanonicalHash: version.hash,
+    analysisCutoffAt: "2026-01-01T00:00:00.000001Z",
+    analysisAt: "2026-01-01T00:00:01.000000Z",
+    matchRefs: [], assessmentRefs: [], analysisMethodIdentity: "isolated-head-analysis",
+    analysisMethodVersion: "1", analysisMethodHash: HASH_A,
+  };
+  const { buildSemanticAnalysisEnvelopeCanonical } = require("../dist/services/rcv022Canonical");
+  const envelope = buildSemanticAnalysisEnvelopeCanonical(envelopeInput);
+  const envelopeRow = {
+    envelope_id: ENVELOPE_A, canonical_version: 1,
+    canonical: envelope.canonical, canonical_hash: envelope.hash,
+    claim_id: claimId, claim_canonical_version: 1, claim_canonical_hash: claim.hash,
+    claim_version_id: CLAIM_VERSION_ID, claim_version_canonical_version: 1,
+    claim_version_canonical_hash: version.hash,
+    analysis_cutoff_at: envelopeInput.analysisCutoffAt, analysis_at: envelopeInput.analysisAt,
+    match_refs: [], assessment_refs: [], analysis_method_identity: envelopeInput.analysisMethodIdentity,
+    analysis_method_version: "1", analysis_method_hash: HASH_A,
+  };
+  const calls = [];
+  const deliveries = [];
+  const membershipTables = ["rcv022_envelope_match_refs", "rcv022_envelope_assessment_refs"];
+  const client = {
+    async query(sql, values = []) {
+      calls.push(sql);
+      if (sql === "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+      if (sql.includes("FROM public.claim_version_authorities ")) return { rows: [{
+        claim_version_id: CLAIM_VERSION_ID, claim_id: claimId, version_number: 1,
+        title: versionInput.title, normalized_statement: versionInput.normalizedStatement,
+        language: "en", claim_type: "fact", canonical_version: 1,
+        canonical: version.canonical, canonical_hash: version.hash,
+      }] };
+      if (sql.includes("FROM public.claim_identity_authorities ")) return { rows: [{
+        claim_id: claimId, canonical_version: 1, canonical: claim.canonical, canonical_hash: claim.hash,
+      }] };
+      if (sql.includes("FROM public.rcv022_semantic_analysis_envelopes ")) {
+        assert.deepEqual(values, [ENVELOPE_A]);
+        return { rows: [envelopeRow] };
+      }
+      const table = membershipTables.find(name => sql.includes(`FROM public.${name} `));
+      if (table !== undefined) {
+        assert.deepEqual(values, [ENVELOPE_A]);
+        const response = table === injectedTable ? injectedResponse : { rows: [] };
+        deliveries.push({ table, response });
+        return response;
+      }
+      throw new Error(`unexpected isolated HEAD query: ${sql}`);
+    },
+    release() { calls.push("RELEASE"); },
+  };
+  const viewSpec = {
+    claimVersionRef: { claimVersionId: CLAIM_VERSION_ID, canonicalVersion: 1, canonicalHash: version.hash },
+    envelopeManifest: [ref(ENVELOPE_A, envelope.hash)], contractVersion: 1,
+  };
+  return { calls, deliveries, run: () => getClaimLevelEvidenceView(viewSpec, { connect: async () => client }) };
+}
+
+test("isolated HEAD many guard accepts actual empty membership arrays", async () => {
+  const harness = isolatedHeadMembershipHarness();
+  const result = await harness.run();
+  assert.equal(result.envelopeManifest.length, 1);
+  assert.equal(result.envelopeManifest[0].envelopeId, ENVELOPE_A);
+  assert.deepEqual(result.assessmentManifest, []);
+  assert.deepEqual(result.occurrenceManifest, []);
+  for (const table of ["rcv022_envelope_match_refs", "rcv022_envelope_assessment_refs"]) {
+    const delivered = harness.deliveries.filter(entry => entry.table === table);
+    assert.equal(delivered.length, 1);
+    assert.deepEqual(delivered[0].response, { rows: [] });
+  }
+  assert.equal(harness.calls.filter(sql => sql === "COMMIT").length, 1);
+  assert.equal(harness.calls.includes("ROLLBACK"), false);
+  assert.equal(harness.calls.filter(sql => sql === "RELEASE").length, 1);
+  assert.deepEqual(harness.calls.slice(-2), ["COMMIT", "RELEASE"]);
+});
+
+test("isolated HEAD many guard rejects invalid query containers", async t => {
+  for (const table of ["rcv022_envelope_match_refs", "rcv022_envelope_assessment_refs"]) {
+    for (const label of ["missing rows", "array with own rows"]) {
+      await t.test(`${table}: ${label}`, async () => {
+        const response = label === "missing rows" ? {} : Object.assign([], { rows: [] });
+        if (label === "missing rows") assert.equal(Object.hasOwn(response, "rows"), false);
+        else {
+          assert.equal(Array.isArray(response), true);
+          assert.equal(Object.hasOwn(response, "rows"), true);
+          assert.deepEqual(response.rows, []);
+        }
+        const harness = isolatedHeadMembershipHarness(table, response);
+        let returned = false;
+        await assert.rejects(async () => {
+          const result = await harness.run();
+          returned = true;
+          return result;
+        }, error => {
+          assert.equal(error.constructor, Error);
+          assert.equal(error.message, "Claim-Level membership query result must be an object with a rows array");
+          return true;
+        });
+        assert.equal(returned, false);
+        const delivered = harness.deliveries.filter(entry => entry.table === table);
+        assert.equal(delivered.length, 1);
+        assert.strictEqual(delivered[0].response, response);
+        assert.equal(harness.calls.filter(sql => sql.includes(`FROM public.${table} `)).length, 1);
+        assert.equal(harness.calls.includes("COMMIT"), false);
+        assert.equal(harness.calls.filter(sql => sql === "ROLLBACK").length, 1);
+        assert.equal(harness.calls.filter(sql => sql === "RELEASE").length, 1);
+        assert.deepEqual(harness.calls.slice(-2), ["ROLLBACK", "RELEASE"]);
+      });
+    }
+  }
+});

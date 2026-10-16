@@ -430,7 +430,14 @@ async function one(client: ClaimLevelEvidenceViewReadClient, sql: string, values
 
 async function many(client: ClaimLevelEvidenceViewReadClient, sql: string, values: readonly unknown[]): Promise<readonly Row[]> {
   const result = await client.query(sql, values);
-  return result.rows ?? [];
+  if (result === null || typeof result !== "object" || Array.isArray(result)) {
+    throw new Error("Claim-Level membership query result must be an object with a rows array");
+  }
+  const rows = result.rows;
+  if (!Array.isArray(rows)) {
+    throw new Error("Claim-Level membership query result must be an object with a rows array");
+  }
+  return rows;
 }
 
 function assertVersion(value: unknown, path: string): 1 {
