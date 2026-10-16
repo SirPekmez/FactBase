@@ -392,3 +392,161 @@ test("isolated HEAD many guard rejects invalid query containers", async t => {
     }
   }
 });
+
+// Narrow type probes only. Fixtures follow the base commit's seedUpstream,
+// makeEvidence and makeEnvelope forms; existing HEAD fixtures are untouched.
+function narrowTypeHarness(edit = null, valid = {}) {
+  const { buildEvidenceFragmentCanonical, buildClaimEvidenceMatchCanonical, buildEvidenceAssessmentCanonical, buildSemanticAnalysisEnvelopeCanonical } = require("../dist/services/rcv022Canonical");
+  const { canonicalizeRcv020Capture } = require("../dist/services/rcv020SemanticCore");
+  const id = n => `84000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const hash = text => require("node:crypto").createHash("sha256").update(text).digest("hex");
+  const selected = (field, fallback) => Object.hasOwn(valid, field) ? valid[field] : fallback;
+  const claimId = id(1), versionId = CLAIM_VERSION_ID;
+  const claim = buildClaimIdentityCanonical({ claimId });
+  const versionInput = { claimId, claimVersionId: versionId, versionNumber: selected("version_number", 1), title: "Golden claim", normalizedStatement: "A persisted authenticated claim", language: "en", claimType: "fact" };
+  const version = buildClaimVersionCanonical(versionInput);
+  const captureInput = {
+    captureId: id(3), logicalSourceId: id(13), monitorId: id(23), monitorConfigurationVersionId: id(33), occurrenceId: id(43), retrievalAttemptId: id(53),
+    requestHash: "c".repeat(64), requestedTarget: "https://example.test/0", finalUrl: "https://example.test/0", redirectCanonical: null,
+    responseStatus: selected("response_status", 200), responseMetadataCanonical: "{}", mediaType: "text/plain", byteLength: "5", observedAt: "2026-01-01T00:00:00.000000Z", contentHash: "b".repeat(64),
+    retentionPolicy: "METADATA_HASH_ONLY", retentionPolicyVersion: selected("retention_policy_version", 1), rawObjectIdentity: null, rawObjectReference: null,
+  };
+  const capture = canonicalizeRcv020Capture(captureInput);
+  const fragmentInput = { fragmentId: id(100), captureId: captureInput.captureId, captureCanonicalVersion: "RCV020-CANONICAL-V1", captureCanonicalHash: capture.hash, captureRepresentationHash: captureInput.contentHash, fragmentKind: "TEXT", locator: { kind: "WHOLE_TEXT" }, contentBinding: { kind: "TEXT", utf8Text: "evidence-0", contentHash: hash("evidence-0") }, extractionAuthority: { kind: "DIRECT" } };
+  const fragment = buildEvidenceFragmentCanonical(fragmentInput);
+  const matchInput = { matchId: id(200), claimId, claimCanonicalVersion: 1, claimCanonicalHash: claim.hash, claimVersionId: versionId, claimVersionCanonicalVersion: 1, claimVersionCanonicalHash: version.hash, evidenceFragmentId: fragmentInput.fragmentId, evidenceFragmentCanonicalVersion: 1, evidenceFragmentCanonicalHash: fragment.hash, matcherIdentity: "golden-matcher", matcherVersion: "1", matcherHash: "e".repeat(64), matcherInputCanonicalHashes: [] };
+  const match = buildClaimEvidenceMatchCanonical(matchInput);
+  const assessmentInput = { assessmentId: id(300), claimEvidenceMatchId: matchInput.matchId, claimEvidenceMatchCanonicalVersion: 1, claimEvidenceMatchCanonicalHash: match.hash, claimId, claimCanonicalVersion: 1, claimCanonicalHash: claim.hash, claimVersionId: versionId, claimVersionCanonicalVersion: 1, claimVersionCanonicalHash: version.hash, evidenceFragmentId: fragmentInput.fragmentId, evidenceFragmentCanonicalVersion: 1, evidenceFragmentCanonicalHash: fragment.hash, assessmentResult: { relation: "SUPPORTS", rationale: "golden rationale 0" }, methodProvenance: { methodType: "DETERMINISTIC", methodIdentity: "golden-method-0", methodVersion: "1", methodHash: "a".repeat(64), inputCanonicalHashes: [], structuredOutputHash: "b".repeat(64), reviewStatus: "NOT_REVIEWED" }, assessedAt: "2026-01-01T00:00:00.123456Z" };
+  const assessment = buildEvidenceAssessmentCanonical(assessmentInput);
+  const envelopeInput = { envelopeId: ENVELOPE_A, claimId, claimCanonicalVersion: 1, claimCanonicalHash: claim.hash, claimVersionId: versionId, claimVersionCanonicalVersion: 1, claimVersionCanonicalHash: version.hash, analysisCutoffAt: "2026-01-01T00:00:00.000001Z", analysisAt: "2026-01-01T00:00:01.000000Z", matchRefs: [{ id: matchInput.matchId, canonicalVersion: 1, canonicalHash: match.hash }], assessmentRefs: [{ id: assessmentInput.assessmentId, canonicalVersion: 1, canonicalHash: assessment.hash }], analysisMethodIdentity: "golden-analysis", analysisMethodVersion: "1", analysisMethodHash: "d".repeat(64) };
+  const envelope = buildSemanticAnalysisEnvelopeCanonical(envelopeInput);
+  // Projection only: values retain their original types; no conversion of query
+  // responses occurs here or after the single-field injection below.
+  const sqlFields = input => Object.fromEntries(Object.entries(input).map(([key, value]) => [key.replace(/[A-Z]/g, letter => "_" + letter.toLowerCase()), value]));
+  const authorityRow = (input, built) => ({ ...sqlFields(input), canonical_version: 1, canonical: built.canonical, canonical_hash: built.hash });
+  const rows = {
+    claim_version_authorities: authorityRow(versionInput, version),
+    claim_identity_authorities: { claim_id: claimId, canonical_version: 1, canonical: claim.canonical, canonical_hash: claim.hash },
+    rcv020_captures: { ...sqlFields(captureInput), canonical: capture.canonical, capture_hash: capture.hash },
+    rcv022_evidence_fragments: authorityRow(fragmentInput, fragment),
+    rcv022_claim_evidence_matches: authorityRow(matchInput, match),
+    rcv022_evidence_assessments: authorityRow(assessmentInput, assessment),
+    rcv022_semantic_analysis_envelopes: authorityRow(envelopeInput, envelope),
+    rcv022_envelope_match_refs: { ordinal: 0, id: matchInput.matchId, canonical_version: 1, canonical_hash: match.hash },
+    rcv022_envelope_assessment_refs: { ordinal: 0, id: assessmentInput.assessmentId, canonical_version: 1, canonical_hash: assessment.hash },
+  };
+  const ids = { claim_version_authorities: versionId, claim_identity_authorities: claimId, rcv020_captures: captureInput.captureId, rcv022_evidence_fragments: fragmentInput.fragmentId, rcv022_claim_evidence_matches: matchInput.matchId, rcv022_evidence_assessments: assessmentInput.assessmentId, rcv022_semantic_analysis_envelopes: ENVELOPE_A, rcv022_envelope_match_refs: ENVELOPE_A, rcv022_envelope_assessment_refs: ENVELOPE_A };
+  const calls = [], deliveries = [];
+  const client = {
+    async query(sql, values = []) {
+      calls.push(sql);
+      if (["BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", "COMMIT", "ROLLBACK"].includes(sql)) return { rows: [] };
+      const table = sql.match(/FROM public\.([a-z_0-9]+)/)?.[1];
+      assert.ok(Object.hasOwn(rows, table), `unexpected narrow query: ${sql}`);
+      assert.deepEqual(values, [ids[table]]);
+      const row = edit?.table === table ? { ...rows[table], [edit.field]: edit.value } : rows[table];
+      if (edit?.table === table && edit.descriptor) Object.defineProperty(row, edit.field, edit.descriptor);
+      deliveries.push({ table, row });
+      return { rows: [row] };
+    },
+    release() { calls.push("RELEASE"); },
+  };
+  const spec = { claimVersionRef: { claimVersionId: versionId, canonicalVersion: 1, canonicalHash: version.hash }, envelopeManifest: [ref(ENVELOPE_A, envelope.hash)], contractVersion: 1 };
+  return { calls, deliveries, rows, run: () => getClaimLevelEvidenceView(spec, { connect: async () => client }) };
+}
+
+const narrowTypeFields = [
+  { name: "version_number", table: "claim_version_authorities", field: "version_number", number: 1, minimum: 1, path: "claimVersion.version_number" },
+  { name: "Capture response_status", table: "rcv020_captures", field: "response_status", number: 200, minimum: -2147483648, path: "capture.response_status" },
+  { name: "Capture retention_policy_version", table: "rcv020_captures", field: "retention_policy_version", number: 1, minimum: 1, path: "capture.retention_policy_version" },
+  { name: "Match Membership ordinal", table: "rcv022_envelope_match_refs", field: "ordinal", number: 0, minimum: 0, path: "matchRefs[0].ordinal" },
+  { name: "Assessment Membership ordinal", table: "rcv022_envelope_assessment_refs", field: "ordinal", number: 0, minimum: 0, path: "assessmentRefs[0].ordinal" },
+];
+
+function assertNarrowRejectedCleanup(harness) {
+  assert.equal(harness.calls.includes("COMMIT"), false);
+  assert.equal(harness.calls.filter(sql => sql === "ROLLBACK").length, 1);
+  assert.equal(harness.calls.filter(sql => sql === "RELEASE").length, 1);
+  assert.deepEqual(harness.calls.slice(-2), ["ROLLBACK", "RELEASE"]);
+}
+
+for (const entry of narrowTypeFields) {
+  test(`narrow Claim-Level type ${entry.name}`, async t => {
+    const control = narrowTypeHarness();
+    const result = await control.run();
+    assert.equal(result.envelopeManifest.length, 1);
+    assert.equal(result.assessmentManifest.length, 1);
+    assert.equal(result.occurrenceManifest.length, 1);
+    assert.equal(result.occurrenceManifest[0].ordinal, 0);
+    assert.equal(typeof control.rows[entry.table][entry.field], "number");
+    assert.equal(control.calls.filter(sql => sql === "COMMIT").length, 1);
+    assert.equal(control.calls.includes("ROLLBACK"), false);
+    assert.equal(control.calls.filter(sql => sql === "RELEASE").length, 1);
+    const bad = [
+      ["coercive decimal text", String(entry.number)],
+      ["coercive array", [entry.number]],
+      ["coercive boxed number", new Number(entry.number)],
+      ["coercive bigint", BigInt(entry.number)],
+      ["null", null], ["undefined", undefined], ["plain object", {}],
+      ["fraction", 0.5], ["NaN", NaN], ["Infinity", Infinity],
+      ["below SQL domain", entry.minimum - 1], ["above int4", 2147483648],
+    ];
+    if (entry.number === 0 || entry.number === 1) bad.push(["coercive boolean", Boolean(entry.number)]);
+    for (const [label, injected] of bad) {
+      await t.test(label, async () => {
+        const harness = narrowTypeHarness({ table: entry.table, field: entry.field, value: injected });
+        let returned = false;
+        await assert.rejects(async () => { const value = await harness.run(); returned = true; return value; }, error => {
+          assert.equal(error.code, "MALFORMED_DATA");
+          assert.equal(error.path, entry.path);
+          assert.ok(error.message.endsWith(": expected PostgreSQL int4 number within field domain"));
+          return true;
+        });
+        assert.equal(returned, false);
+        const delivered = harness.deliveries.filter(item => item.table === entry.table);
+        assert.equal(delivered.length, 1);
+        assert.strictEqual(delivered[0].row[entry.field], injected);
+        assertNarrowRejectedCleanup(harness);
+      });
+    }
+  });
+}
+
+test("narrow Claim-Level evidenced SQL domains retain valid numeric boundary controls", async t => {
+  for (const [field, values] of [["version_number", [1, 2147483647]], ["response_status", [-2147483648, 2147483647]], ["retention_policy_version", [1, 2147483647]]]) {
+    for (const value of values) {
+      await t.test(`${field}: ${value}`, async () => {
+        const harness = narrowTypeHarness(null, { [field]: value });
+        const result = await harness.run();
+        assert.equal(result.assessmentManifest.length, 1);
+        assert.equal(harness.calls.filter(sql => sql === "COMMIT").length, 1);
+        assert.equal(harness.calls.includes("ROLLBACK"), false);
+        assert.equal(harness.calls.filter(sql => sql === "RELEASE").length, 1);
+      });
+    }
+  }
+});
+
+test("narrow Claim-Level installed default int4 parser delivers numeric scalar fields without a connection", () => {
+  const Result = require("pg/lib/result");
+  const types = require("pg-types");
+  assert.equal(types.builtins.INT4, 23);
+  const result = new Result();
+  result.addFields(["version_number", "response_status", "retention_policy_version", "ordinal"].map(name => ({ name, dataTypeID: types.builtins.INT4, format: "text" })));
+  assert.deepEqual(result.parseRow(["1", "200", "1", "0"]), { version_number: 1, response_status: 200, retention_policy_version: 1, ordinal: 0 });
+});
+
+
+test("narrow Claim-Level ordinal is revalidated before occurrence conversion", async () => {
+  let reads = 0;
+  const getter = () => { reads += 1; return reads === 1 ? 0 : "0"; };
+  const harness = narrowTypeHarness({ table: "rcv022_envelope_assessment_refs", field: "ordinal", descriptor: { configurable: true, enumerable: true, get: getter } });
+  let returned = false;
+  await assert.rejects(async () => { const value = await harness.run(); returned = true; return value; }, error => error.code === "MALFORMED_DATA" && error.path === "assessmentRefs.ordinal");
+  assert.equal(returned, false);
+  assert.equal(reads, 2);
+  const delivered = harness.deliveries.filter(item => item.table === "rcv022_envelope_assessment_refs");
+  assert.equal(delivered.length, 1);
+  assert.strictEqual(Object.getOwnPropertyDescriptor(delivered[0].row, "ordinal").get, getter);
+  assertNarrowRejectedCleanup(harness);
+});

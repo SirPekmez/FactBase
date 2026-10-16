@@ -409,6 +409,15 @@ function createSha256(value: string): string {
   return require("node:crypto").createHash("sha256").update(value, "utf8").digest("hex") as string;
 }
 
+// These selected SQL INTEGER fields use pg's bound default int4 parser.
+// Each call supplies its own persisted lower bound; no string input is admitted.
+function queryInt4(value: unknown, path: string, minimum: number): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < minimum || value > 2147483647) {
+    verifyFail("MALFORMED_DATA", path, "expected PostgreSQL int4 number within field domain");
+  }
+  return Number(value);
+}
+
 function compareValue(actual: unknown, expected: unknown, path: string, code: ClaimLevelEvidenceViewVerificationCode = "LINEAGE_MISMATCH"): void {
   if (typeof actual === "object" || typeof expected === "object") {
     let actualCanonical: string;
@@ -490,10 +499,11 @@ async function authenticateClaimAndVersion(client: ClaimLevelEvidenceViewReadCli
   assertVersion(parsed.canonicalVersion, "claimVersion.canonicalVersion");
   const claimVersionId = assertUuid(versionRow.claim_version_id, "claimVersion.claim_version_id");
   const claimId = assertUuid(versionRow.claim_id, "claimVersion.claim_id");
+  const versionNumber = queryInt4(versionRow.version_number, "claimVersion.version_number", 1);
   const expectedVersion = reconstruct("claimVersion", () => buildClaimVersionCanonical({
     claimId,
     claimVersionId,
-    versionNumber: Number(versionRow.version_number),
+    versionNumber,
     title: asText(versionRow.title, "claimVersion.title"),
     normalizedStatement: asText(versionRow.normalized_statement, "claimVersion.normalized_statement"),
     language: asText(versionRow.language, "claimVersion.language"),
@@ -540,8 +550,10 @@ async function authenticateFragment(client: ClaimLevelEvidenceViewReadClient, id
   if (built.hash !== row.canonical_hash) verifyFail("HASH_MISMATCH", "evidenceFragment.canonical_hash", "Fragment canonical hash differs");
   compareValue(parsed.fragmentId, fragmentId, "evidenceFragment.fragmentId");
   const captureRow = await one(client, `SELECT capture_id::text AS capture_id, logical_source_id::text AS logical_source_id, monitor_id::text AS monitor_id, monitor_configuration_version_id::text AS monitor_configuration_version_id, occurrence_id::text AS occurrence_id, retrieval_attempt_id::text AS retrieval_attempt_id, request_hash, requested_target, final_url, redirect_canonical, response_status, response_metadata_canonical, media_type, byte_length::text AS byte_length, to_char(observed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS observed_at, content_hash, canonical, capture_hash, retention_policy, retention_policy_version, raw_object_identity, raw_object_reference FROM public.rcv020_captures WHERE capture_id=$1`, [input.captureId], "evidenceFragment.capture");
+  const responseStatus = queryInt4(captureRow.response_status, "capture.response_status", -2147483648);
+  const retentionPolicyVersion = queryInt4(captureRow.retention_policy_version, "capture.retention_policy_version", 1);
   const capture = reconstruct("evidenceFragment.capture", () => canonicalizeRcv020Capture({
-    captureId: asText(captureRow.capture_id, "capture.capture_id"), logicalSourceId: asText(captureRow.logical_source_id, "capture.logical_source_id"), monitorId: asText(captureRow.monitor_id, "capture.monitor_id"), monitorConfigurationVersionId: asText(captureRow.monitor_configuration_version_id, "capture.monitor_configuration_version_id"), occurrenceId: asText(captureRow.occurrence_id, "capture.occurrence_id"), retrievalAttemptId: asText(captureRow.retrieval_attempt_id, "capture.retrieval_attempt_id"), observedAt: asText(captureRow.observed_at, "capture.observed_at"), contentHash: asText(captureRow.content_hash, "capture.content_hash"), byteLength: asText(captureRow.byte_length, "capture.byte_length"), rawObjectIdentity: captureRow.raw_object_identity == null ? null : asText(captureRow.raw_object_identity, "capture.raw_object_identity"), requestHash: asText(captureRow.request_hash, "capture.request_hash"), requestedTarget: asText(captureRow.requested_target, "capture.requested_target"), finalUrl: captureRow.final_url == null ? null : asText(captureRow.final_url, "capture.final_url"), redirectCanonical: captureRow.redirect_canonical == null ? null : asText(captureRow.redirect_canonical, "capture.redirect_canonical"), responseStatus: Number(captureRow.response_status), responseMetadataCanonical: asText(captureRow.response_metadata_canonical, "capture.response_metadata_canonical"), mediaType: asText(captureRow.media_type, "capture.media_type"), retentionPolicy: asText(captureRow.retention_policy, "capture.retention_policy"), retentionPolicyVersion: Number(captureRow.retention_policy_version),
+    captureId: asText(captureRow.capture_id, "capture.capture_id"), logicalSourceId: asText(captureRow.logical_source_id, "capture.logical_source_id"), monitorId: asText(captureRow.monitor_id, "capture.monitor_id"), monitorConfigurationVersionId: asText(captureRow.monitor_configuration_version_id, "capture.monitor_configuration_version_id"), occurrenceId: asText(captureRow.occurrence_id, "capture.occurrence_id"), retrievalAttemptId: asText(captureRow.retrieval_attempt_id, "capture.retrieval_attempt_id"), observedAt: asText(captureRow.observed_at, "capture.observed_at"), contentHash: asText(captureRow.content_hash, "capture.content_hash"), byteLength: asText(captureRow.byte_length, "capture.byte_length"), rawObjectIdentity: captureRow.raw_object_identity == null ? null : asText(captureRow.raw_object_identity, "capture.raw_object_identity"), requestHash: asText(captureRow.request_hash, "capture.request_hash"), requestedTarget: asText(captureRow.requested_target, "capture.requested_target"), finalUrl: captureRow.final_url == null ? null : asText(captureRow.final_url, "capture.final_url"), redirectCanonical: captureRow.redirect_canonical == null ? null : asText(captureRow.redirect_canonical, "capture.redirect_canonical"), responseStatus, responseMetadataCanonical: asText(captureRow.response_metadata_canonical, "capture.response_metadata_canonical"), mediaType: asText(captureRow.media_type, "capture.media_type"), retentionPolicy: asText(captureRow.retention_policy, "capture.retention_policy"), retentionPolicyVersion,
     rawObjectReference: captureRow.raw_object_reference == null ? null : asText(captureRow.raw_object_reference, "capture.raw_object_reference"),
   } as never));
   if (capture.canonical !== captureRow.canonical) verifyFail("CANONICAL_MISMATCH", "evidenceFragment.capture.canonical", "Capture canonical reconstruction differs");
@@ -674,7 +686,7 @@ async function authenticateEnvelope(client: ClaimLevelEvidenceViewReadClient, re
   const assessmentRefs = await many(client, "SELECT ordinal, assessment_id::text AS id, assessment_canonical_version AS canonical_version, assessment_canonical_hash AS canonical_hash FROM public.rcv022_envelope_assessment_refs WHERE envelope_id=$1 ORDER BY ordinal", [ref.envelopeId]);
   const checkMembership = (rows: readonly Row[], canonicalRefs: unknown, path: string): void => {
     if (!Array.isArray(canonicalRefs) || rows.length !== canonicalRefs.length) verifyFail("LINEAGE_MISMATCH", path, "membership projection cardinality mismatch");
-    rows.forEach((membership, ordinal) => { const expected = asObject((canonicalRefs as readonly unknown[])[ordinal], `${path}[${ordinal}]`); compareValue(membership.ordinal, ordinal, `${path}[${ordinal}].ordinal`); compareValue(membership.id, expected.id, `${path}[${ordinal}].id`); compareValue(membership.canonical_version, expected.canonicalVersion, `${path}[${ordinal}].canonicalVersion`); compareValue(membership.canonical_hash, expected.canonicalHash, `${path}[${ordinal}].canonicalHash`, "HASH_MISMATCH"); });
+    rows.forEach((membership, ordinal) => { const expected = asObject((canonicalRefs as readonly unknown[])[ordinal], `${path}[${ordinal}]`); compareValue(queryInt4(membership.ordinal, `${path}[${ordinal}].ordinal`, 0), ordinal, `${path}[${ordinal}].ordinal`); compareValue(membership.id, expected.id, `${path}[${ordinal}].id`); compareValue(membership.canonical_version, expected.canonicalVersion, `${path}[${ordinal}].canonicalVersion`); compareValue(membership.canonical_hash, expected.canonicalHash, `${path}[${ordinal}].canonicalHash`, "HASH_MISMATCH"); });
   };
   checkMembership(matchRefs, parsed.matchRefs, "matchRefs"); checkMembership(assessmentRefs, parsed.assessmentRefs, "assessmentRefs");
   const matchIds = new Set<string>();
@@ -688,7 +700,7 @@ async function authenticateEnvelope(client: ClaimLevelEvidenceViewReadClient, re
   }
   const occurrences: AssessmentOccurrence[] = []; const assessments: AuthenticatedAssessment[] = [];
   for (const membership of assessmentRefs) {
-    const id = asText(membership.id, "assessmentRefs.id"); const assessment = assessmentCache.get(id) ?? await authenticateAssessment(client, id, target, targetClaimId, targetClaimCanonicalHash, matchCache, fragmentCache); assessmentCache.set(id, assessment); if (!matchIds.has(assessment.match.ref.matchId)) verifyFail("LINEAGE_MISMATCH", `assessmentRefs.${id}`, "Assessment Match is not an authenticated Envelope member"); compareValue(membership.canonical_version, assessment.row.canonical_version, `assessmentRefs.${id}.canonicalVersion`); compareValue(membership.canonical_hash, assessment.row.canonical_hash, `assessmentRefs.${id}.canonicalHash`, "HASH_MISMATCH"); occurrences.push({ envelopeRef: ref, assessmentRef: assessment.ref, ordinal: Number(membership.ordinal) }); assessments.push(assessment);
+    const id = asText(membership.id, "assessmentRefs.id"); const assessment = assessmentCache.get(id) ?? await authenticateAssessment(client, id, target, targetClaimId, targetClaimCanonicalHash, matchCache, fragmentCache); assessmentCache.set(id, assessment); if (!matchIds.has(assessment.match.ref.matchId)) verifyFail("LINEAGE_MISMATCH", `assessmentRefs.${id}`, "Assessment Match is not an authenticated Envelope member"); compareValue(membership.canonical_version, assessment.row.canonical_version, `assessmentRefs.${id}.canonicalVersion`); compareValue(membership.canonical_hash, assessment.row.canonical_hash, `assessmentRefs.${id}.canonicalHash`, "HASH_MISMATCH"); occurrences.push({ envelopeRef: ref, assessmentRef: assessment.ref, ordinal: queryInt4(membership.ordinal, "assessmentRefs.ordinal", 0) }); assessments.push(assessment);
   }
   return { provenance: Object.freeze({ envelopeRef: ref, claimVersionRef: target, analysisCutoffAt: input.analysisCutoffAt, analysisAt: input.analysisAt, analysisMethodIdentity: input.analysisMethodIdentity, analysisMethodVersion: input.analysisMethodVersion, analysisMethodHash: input.analysisMethodHash }), occurrences, assessments };
 }
