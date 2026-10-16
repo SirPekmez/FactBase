@@ -550,3 +550,65 @@ test("narrow Claim-Level ordinal is revalidated before occurrence conversion", a
   assert.strictEqual(Object.getOwnPropertyDescriptor(delivered[0].row, "ordinal").get, getter);
   assertNarrowRejectedCleanup(harness);
 });
+
+
+// Membership canonical versions must retain the authenticated numeric type.
+for (const [label, table, prefix] of [
+  ["Match", "rcv022_envelope_match_refs", "matchRefs"],
+  ["Assessment", "rcv022_envelope_assessment_refs", "assessmentRefs"],
+]) {
+  test(`Membership canonical_version ${label}`, async t => {
+    await t.test("numeric 1 control", async () => {
+      const harness = narrowTypeHarness({ table, field: "canonical_version", value: 1 });
+      const result = await harness.run();
+      const deliveries = harness.deliveries.filter(item => item.table === table);
+      assert.equal(deliveries.length, 1);
+      assert.strictEqual(deliveries[0].row.canonical_version, 1);
+      assert.equal(result.envelopeManifest.length, 1);
+      assert.equal(result.assessmentManifest.length, 1);
+      assert.equal(result.occurrenceManifest.length, 1);
+      assert.equal(harness.calls.filter(sql => sql === "COMMIT").length, 1);
+      assert.equal(harness.calls.includes("ROLLBACK"), false);
+      assert.equal(harness.calls.filter(sql => sql === "RELEASE").length, 1);
+    });
+    for (const [name, injected] of [
+      ["text 1", "1"], ["bigint 1", 1n], ["boolean", true],
+      ["boxed number", new Number(1)], ["array", [1]], ["object", {}],
+      ["null", null], ["undefined", undefined],
+      ["numeric 0", 0], ["numeric 2", 2], ["fraction", 1.5],
+      ["NaN", NaN], ["Infinity", Infinity],
+    ]) {
+      await t.test(name, async () => {
+        const harness = narrowTypeHarness({ table, field: "canonical_version", value: injected });
+        let returned = false;
+        await assert.rejects(async () => { const result = await harness.run(); returned = true; return result; }, error => {
+          assert.equal(error.code, "UNSUPPORTED_VERSION");
+          assert.equal(error.path, `${prefix}[0].canonicalVersion`);
+          return true;
+        });
+        assert.equal(returned, false);
+        const deliveries = harness.deliveries.filter(item => item.table === table);
+        assert.equal(deliveries.length, 1);
+        assert.strictEqual(deliveries[0].row.canonical_version, injected);
+        assertNarrowRejectedCleanup(harness);
+      });
+    }
+    await t.test("revalidated at authenticated member comparison", async () => {
+      let reads = 0;
+      const getter = () => { reads += 1; return reads === 1 ? 1 : "1"; };
+      const harness = narrowTypeHarness({ table, field: "canonical_version", descriptor: { configurable: true, enumerable: true, get: getter } });
+      let returned = false;
+      await assert.rejects(async () => { const result = await harness.run(); returned = true; return result; }, error => {
+        assert.equal(error.code, "UNSUPPORTED_VERSION");
+        assert.equal(error.path, `${prefix}.${harness.rows[table].id}.canonicalVersion`);
+        return true;
+      });
+      assert.equal(returned, false);
+      assert.equal(reads, 2);
+      const deliveries = harness.deliveries.filter(item => item.table === table);
+      assert.equal(deliveries.length, 1);
+      assert.strictEqual(Object.getOwnPropertyDescriptor(deliveries[0].row, "canonical_version").get, getter);
+      assertNarrowRejectedCleanup(harness);
+    });
+  });
+}
