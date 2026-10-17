@@ -407,9 +407,9 @@ function narrowTypeHarness(edit = null, valid = {}) {
   const version = buildClaimVersionCanonical(versionInput);
   const captureInput = {
     captureId: id(3), logicalSourceId: id(13), monitorId: id(23), monitorConfigurationVersionId: id(33), occurrenceId: id(43), retrievalAttemptId: id(53),
-    requestHash: "c".repeat(64), requestedTarget: "https://example.test/0", finalUrl: "https://example.test/0", redirectCanonical: null,
+    requestHash: "c".repeat(64), requestedTarget: "https://example.test/0", finalUrl: selected("final_url", "https://example.test/0"), redirectCanonical: selected("redirect_canonical", null),
     responseStatus: selected("response_status", 200), responseMetadataCanonical: "{}", mediaType: "text/plain", byteLength: "5", observedAt: "2026-01-01T00:00:00.000000Z", contentHash: "b".repeat(64),
-    retentionPolicy: "METADATA_HASH_ONLY", retentionPolicyVersion: selected("retention_policy_version", 1), rawObjectIdentity: null, rawObjectReference: null,
+    retentionPolicy: "METADATA_HASH_ONLY", retentionPolicyVersion: selected("retention_policy_version", 1), rawObjectIdentity: selected("raw_object_identity", null), rawObjectReference: selected("raw_object_reference", null),
   };
   const capture = canonicalizeRcv020Capture(captureInput);
   const fragmentInput = { fragmentId: id(100), captureId: captureInput.captureId, captureCanonicalVersion: "RCV020-CANONICAL-V1", captureCanonicalHash: capture.hash, captureRepresentationHash: captureInput.contentHash, fragmentKind: "TEXT", locator: { kind: "WHOLE_TEXT" }, contentBinding: { kind: "TEXT", utf8Text: "evidence-0", contentHash: hash("evidence-0") }, extractionAuthority: { kind: "DIRECT" } };
@@ -750,3 +750,54 @@ for (const [label, table, prefix] of [
     }
   });
 }
+
+
+const nullableCaptureFields = ["final_url", "redirect_canonical", "raw_object_identity", "raw_object_reference"];
+function nullableCaptureHarness() {
+  return narrowTypeHarness(null, Object.fromEntries(nullableCaptureFields.map(key => [key, null])));
+}
+
+test("Capture nullable projection presence", async t => {
+  await t.test("present authenticated null control", async () => {
+    const harness = nullableCaptureHarness();
+    const row = harness.rows.rcv020_captures;
+    const canonical = JSON.parse(row.canonical);
+    for (const [key, canonicalKey] of [["final_url", "finalUrl"], ["redirect_canonical", "redirectCanonical"], ["raw_object_identity", "rawObjectIdentity"], ["raw_object_reference", "rawObjectReference"]]) {
+      assert.equal(Object.hasOwn(row, key), true);
+      assert.strictEqual(row[key], null);
+      assert.strictEqual(canonical[canonicalKey], null);
+    }
+    const result = await harness.run();
+    assertMembershipRawDelivery(harness, "rcv020_captures", row);
+    assertMembershipIdentityControl(harness, result);
+  });
+  await t.test("present text control retains existing acceptance", async () => {
+    const values = { final_url: "https://example.test/0", redirect_canonical: "[]", raw_object_identity: "unit-object-identity", raw_object_reference: "unit-object-reference" };
+    const harness = narrowTypeHarness(null, values);
+    const row = harness.rows.rcv020_captures;
+    for (const [key, value] of Object.entries(values)) { assert.equal(Object.hasOwn(row, key), true); assert.strictEqual(row[key], value); }
+    const result = await harness.run();
+    assertMembershipRawDelivery(harness, "rcv020_captures", row);
+    assertMembershipIdentityControl(harness, result);
+  });
+  for (const field of nullableCaptureFields) {
+    for (const mode of ["missing", "undefined"]) {
+      await t.test(`${field}: ${mode}`, async () => {
+        const harness = nullableCaptureHarness();
+        const row = harness.rows.rcv020_captures;
+        const original = { ...row };
+        const canonicalKey = { final_url: "finalUrl", redirect_canonical: "redirectCanonical", raw_object_identity: "rawObjectIdentity", raw_object_reference: "rawObjectReference" }[field];
+        assert.strictEqual(JSON.parse(row.canonical)[canonicalKey], null);
+        if (mode === "missing") delete row[field]; else row[field] = undefined;
+        assert.equal(Object.hasOwn(row, field), mode === "undefined");
+        assert.strictEqual(row[field], undefined);
+        assert.deepEqual(Object.keys(original).filter(key => !Object.hasOwn(row, key) || !Object.is(row[key], original[key])), [field]);
+        await rejectMembershipIdentity(harness, `capture.${field}`);
+        assertMembershipRawDelivery(harness, "rcv020_captures", row);
+        assert.strictEqual(row.canonical, original.canonical);
+        assert.strictEqual(row.capture_hash, original.capture_hash);
+        for (const key of nullableCaptureFields.filter(key => key !== field)) { assert.equal(Object.hasOwn(row, key), true); assert.strictEqual(row[key], null); }
+      });
+    }
+  }
+});

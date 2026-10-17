@@ -382,6 +382,16 @@ function asText(value: unknown, path: string): string {
   return value;
 }
 
+// These nullable SQL projections must still be present in the query Row.
+function requiredCaptureField(row: Row, key: "final_url" | "redirect_canonical" | "raw_object_identity" | "raw_object_reference"): unknown {
+  const present = Object.prototype.hasOwnProperty.call(row, key);
+  const value = present ? row[key] : undefined;
+  if (!present || value === undefined) {
+    verifyFail("MALFORMED_DATA", `capture.${key}`, "expected present Capture field");
+  }
+  return value;
+}
+
 function asObject(value: unknown, path: string): Row {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     verifyFail("MALFORMED_DATA", path, "expected object");
@@ -562,9 +572,13 @@ async function authenticateFragment(client: ClaimLevelEvidenceViewReadClient, id
   const captureRow = await one(client, `SELECT capture_id::text AS capture_id, logical_source_id::text AS logical_source_id, monitor_id::text AS monitor_id, monitor_configuration_version_id::text AS monitor_configuration_version_id, occurrence_id::text AS occurrence_id, retrieval_attempt_id::text AS retrieval_attempt_id, request_hash, requested_target, final_url, redirect_canonical, response_status, response_metadata_canonical, media_type, byte_length::text AS byte_length, to_char(observed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS observed_at, content_hash, canonical, capture_hash, retention_policy, retention_policy_version, raw_object_identity, raw_object_reference FROM public.rcv020_captures WHERE capture_id=$1`, [input.captureId], "evidenceFragment.capture");
   const responseStatus = queryInt4(captureRow.response_status, "capture.response_status", -2147483648);
   const retentionPolicyVersion = queryInt4(captureRow.retention_policy_version, "capture.retention_policy_version", 1);
+  const finalUrl = requiredCaptureField(captureRow, "final_url");
+  const redirectCanonical = requiredCaptureField(captureRow, "redirect_canonical");
+  const rawObjectIdentity = requiredCaptureField(captureRow, "raw_object_identity");
+  const rawObjectReference = requiredCaptureField(captureRow, "raw_object_reference");
   const capture = reconstruct("evidenceFragment.capture", () => canonicalizeRcv020Capture({
-    captureId: asText(captureRow.capture_id, "capture.capture_id"), logicalSourceId: asText(captureRow.logical_source_id, "capture.logical_source_id"), monitorId: asText(captureRow.monitor_id, "capture.monitor_id"), monitorConfigurationVersionId: asText(captureRow.monitor_configuration_version_id, "capture.monitor_configuration_version_id"), occurrenceId: asText(captureRow.occurrence_id, "capture.occurrence_id"), retrievalAttemptId: asText(captureRow.retrieval_attempt_id, "capture.retrieval_attempt_id"), observedAt: asText(captureRow.observed_at, "capture.observed_at"), contentHash: asText(captureRow.content_hash, "capture.content_hash"), byteLength: asText(captureRow.byte_length, "capture.byte_length"), rawObjectIdentity: captureRow.raw_object_identity == null ? null : asText(captureRow.raw_object_identity, "capture.raw_object_identity"), requestHash: asText(captureRow.request_hash, "capture.request_hash"), requestedTarget: asText(captureRow.requested_target, "capture.requested_target"), finalUrl: captureRow.final_url == null ? null : asText(captureRow.final_url, "capture.final_url"), redirectCanonical: captureRow.redirect_canonical == null ? null : asText(captureRow.redirect_canonical, "capture.redirect_canonical"), responseStatus, responseMetadataCanonical: asText(captureRow.response_metadata_canonical, "capture.response_metadata_canonical"), mediaType: asText(captureRow.media_type, "capture.media_type"), retentionPolicy: asText(captureRow.retention_policy, "capture.retention_policy"), retentionPolicyVersion,
-    rawObjectReference: captureRow.raw_object_reference == null ? null : asText(captureRow.raw_object_reference, "capture.raw_object_reference"),
+    captureId: asText(captureRow.capture_id, "capture.capture_id"), logicalSourceId: asText(captureRow.logical_source_id, "capture.logical_source_id"), monitorId: asText(captureRow.monitor_id, "capture.monitor_id"), monitorConfigurationVersionId: asText(captureRow.monitor_configuration_version_id, "capture.monitor_configuration_version_id"), occurrenceId: asText(captureRow.occurrence_id, "capture.occurrence_id"), retrievalAttemptId: asText(captureRow.retrieval_attempt_id, "capture.retrieval_attempt_id"), observedAt: asText(captureRow.observed_at, "capture.observed_at"), contentHash: asText(captureRow.content_hash, "capture.content_hash"), byteLength: asText(captureRow.byte_length, "capture.byte_length"), rawObjectIdentity: rawObjectIdentity == null ? null : asText(rawObjectIdentity, "capture.raw_object_identity"), requestHash: asText(captureRow.request_hash, "capture.request_hash"), requestedTarget: asText(captureRow.requested_target, "capture.requested_target"), finalUrl: finalUrl == null ? null : asText(finalUrl, "capture.final_url"), redirectCanonical: redirectCanonical == null ? null : asText(redirectCanonical, "capture.redirect_canonical"), responseStatus, responseMetadataCanonical: asText(captureRow.response_metadata_canonical, "capture.response_metadata_canonical"), mediaType: asText(captureRow.media_type, "capture.media_type"), retentionPolicy: asText(captureRow.retention_policy, "capture.retention_policy"), retentionPolicyVersion,
+    rawObjectReference: rawObjectReference == null ? null : asText(rawObjectReference, "capture.raw_object_reference"),
   } as never));
   if (capture.canonical !== captureRow.canonical) verifyFail("CANONICAL_MISMATCH", "evidenceFragment.capture.canonical", "Capture canonical reconstruction differs");
   if (capture.hash !== captureRow.capture_hash) verifyFail("HASH_MISMATCH", "evidenceFragment.capture.capture_hash", "Capture canonical hash differs");
