@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { Pool } = require("pg");
 const test = require("node:test");
+const { FailureTransportGroup, throwRetainedFailures } = require("../dist/services/failureTransport");
 
 const database = process.env.RCV022_WAVE_B_DATABASE;
 const enabled = Boolean(database && process.env.PGHOST && process.env.PGPORT);
@@ -12,6 +13,32 @@ const id = (n) => `84000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const hash = (value) => require("node:crypto").createHash("sha256").update(value, "utf8").digest("hex");
 const h = (character) => character.repeat(64);
 
+// Fixture cleanup uses neutral transport; transaction and session actions remain explicit.
+async function withFixtureClient(operation, { transaction = false, resetReplicationRole = false, source = pool } = {}) {
+  const client = await source.connect();
+  const retained = [];
+  let value;
+  try {
+    if (transaction) await client.query("BEGIN");
+    value = await operation(client);
+    if (transaction) await client.query("COMMIT");
+  } catch (error) {
+    retained.push({ phase: "primary", error });
+    if (transaction) {
+      try { await client.query("ROLLBACK"); }
+      catch (error) { retained.push({ phase: "rollback", error }); }
+    }
+  }
+  if (resetReplicationRole) {
+    try { await client.query("SET session_replication_role='origin'"); }
+    catch (error) { retained.push({ phase: "session-reset", error }); }
+  }
+  try { await client.release(); }
+  catch (error) { retained.push({ phase: "connection-release", error }); }
+  throwRetainedFailures(retained);
+  return value;
+}
+
 function migrationFiles() {
   return fs.readdirSync(path.join(root, "migrations"))
     .filter((name) => name.endsWith(".sql"))
@@ -20,10 +47,9 @@ function migrationFiles() {
 }
 
 async function replayMigrations() {
-  const client = await pool.connect();
-  try {
+  return withFixtureClient(async client => {
     for (const file of migrationFiles()) await client.query(fs.readFileSync(file, "utf8"));
-  } finally { client.release(); }
+  });
 }
 
 async function seedUpstream() {
@@ -36,12 +62,18 @@ async function seedUpstream() {
     captureId: id(n), logicalSourceId: id(10 + n), monitorId: id(20 + n), monitorConfigurationVersionId: id(30 + n), occurrenceId: id(40 + n), retrievalAttemptId: id(50 + n),
     requestHash: h(String.fromCharCode(96 + n)), requestedTarget: `https://example.test/${n}`, finalUrl: `https://example.test/${n}`, redirectCanonical: null,
     responseStatus: 200, responseMetadataCanonical: "{}", mediaType: "text/plain", byteLength: "5", observedAt: "2026-01-01T00:00:00.000000Z", contentHash: h("b"),
-    retentionPolicy: "METADATA_HASH_ONLY", retentionPolicyVersion: 1, rawObjectIdentity: null, rawObjectReference: null,
+    retentionPolicy: "METADATA_HASH_ONLY", retentionPolicyVersion: 1, rawObjectIdentity: null, rawObjectReference: n === 3 ? `fixture://rcv020/captures/${id(n)}/original` : null,
   }));
-  const captureCanonical = require("../dist/services/rcv020SemanticCore");
-  const builtCaptures = captures.map((capture) => ({ ...capture, built: captureCanonical.canonicalizeRcv020Capture(capture) }));
-  const client = await pool.connect();
-  try {
+  const { canonicalizeRcv020 } = require("../dist/services/rcv020Canonical");
+  const builtCaptures = captures.map((capture) => {
+    // Match persisted RCV-020 authority; raw-object location is a separate column.
+    const { rawObjectReference, ...envelope } = capture;
+    const built = canonicalizeRcv020({ schema: "RCV020-CAPTURE-ENVELOPE-V1", ...envelope, byteLength: String(capture.byteLength) });
+    assert.equal(built.hash, hash(built.canonical));
+    assert.equal(Object.hasOwn(JSON.parse(built.canonical), "rawObjectReference"), false);
+    return { ...capture, built };
+  });
+  await withFixtureClient(async client => {
     await client.query("SET session_replication_role='replica'");
     await client.query("INSERT INTO public.claims(id) VALUES ($1)", [claimId]);
     await client.query(`INSERT INTO public.claim_versions (id,claim_id,version_number,title,normalized_statement,language,claim_type,status,publication_status,change_reason,created_at) VALUES ($1,$2,1,'Golden claim','A persisted authenticated claim','en','fact','draft','unpublished','wave-b',$3)`, [versionId, claimId, "2026-01-01T00:00:00.000000Z"]);
@@ -49,17 +81,13 @@ async function seedUpstream() {
     for (const capture of builtCaptures) {
       await client.query(`INSERT INTO public.rcv020_captures (capture_id,logical_source_id,monitor_id,monitor_configuration_version_id,occurrence_id,retrieval_attempt_id,request_hash,requested_target,final_url,redirect_canonical,response_status,response_metadata_canonical,media_type,byte_length,observed_at,content_hash,canonical,capture_hash,retention_policy,retention_policy_version,raw_object_identity,raw_object_reference) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`, [capture.captureId,capture.logicalSourceId,capture.monitorId,capture.monitorConfigurationVersionId,capture.occurrenceId,capture.retrievalAttemptId,capture.requestHash,capture.requestedTarget,capture.finalUrl,capture.redirectCanonical,capture.responseStatus,capture.responseMetadataCanonical,capture.mediaType,capture.byteLength,capture.observedAt,capture.contentHash,capture.built.canonical,capture.built.hash,capture.retentionPolicy,capture.retentionPolicyVersion,capture.rawObjectIdentity,capture.rawObjectReference]);
     }
-  } finally { await client.query("SET session_replication_role='origin'").catch(() => {}); client.release(); }
-  const authority = await pool.connect();
-  try {
-    await authority.query("BEGIN");
+  }, { resetReplicationRole: true });
+  return withFixtureClient(async authority => {
     const claim = await claimWriter.persistClaimIdentityAuthorityWithinTransaction(authority, claimId);
     const version = await claimWriter.persistClaimVersionAuthorityWithinTransaction(authority, versionId);
     const version2 = await claimWriter.persistClaimVersionAuthorityWithinTransaction(authority, version2Id);
-    await authority.query("COMMIT");
     return { claimId, versionId, version2Id, captures: builtCaptures, claim, version, version2, claimCanonical };
-  } catch (error) { await authority.query("ROLLBACK").catch(() => {}); throw error; }
-  finally { authority.release(); }
+  }, { transaction: true });
 }
 
 function makeEvidence(ids, n, relation) {
@@ -83,30 +111,25 @@ function makeEnvelope(ids, envelopeId, evidence, analysisAt) {
 
 async function persistBundle(bundle) {
   const writer = require("../dist/services/rcv022Writer");
-  const client = await pool.connect();
-  try { await client.query("BEGIN"); await writer.persistRcv022BundleWithinTransaction(client, bundle); await client.query("COMMIT"); }
-  catch (error) { await client.query("ROLLBACK").catch(() => {}); throw error; }
-  finally { client.release(); }
+  return withFixtureClient(client => writer.persistRcv022BundleWithinTransaction(client, bundle), { transaction: true });
 }
 
 async function physicalMembershipOrder(envelopeId) {
-  const client = await pool.connect();
-  try {
+  return withFixtureClient(async client => {
     const result = await client.query(
       "SELECT ctid::text AS physical_id, ordinal, assessment_id::text AS assessment_id FROM public.rcv022_envelope_assessment_refs WHERE envelope_id=$1 ORDER BY ctid",
       [envelopeId],
     );
     return result.rows.map((row) => [row.physical_id, Number(row.ordinal), row.assessment_id]);
-  } finally { client.release(); }
+  });
 }
 
 async function reorderMembershipStorage() {
-  const client = await pool.connect();
-  try {
+  return withFixtureClient(async client => {
     await client.query("CREATE INDEX claim_level_wave_b_row_order_idx ON public.rcv022_envelope_assessment_refs (envelope_id, ordinal DESC)");
     await client.query("CLUSTER public.rcv022_envelope_assessment_refs USING claim_level_wave_b_row_order_idx");
     await client.query("DROP INDEX claim_level_wave_b_row_order_idx");
-  } finally { client.release(); }
+  });
 }
 
 function tamperedMatchCommitmentPool(basePool, envelopeId, tamperedCanonical, tamperedHash, tamperedMatchRefs, wrongMatchHash) {
@@ -124,7 +147,7 @@ function tamperedMatchCommitmentPool(basePool, envelopeId, tamperedCanonical, ta
           }
           return result;
         },
-        release() { client.release(); },
+        release() { return client.release(); },
       };
     },
   };
@@ -178,7 +201,7 @@ test("Wave B Golden Slice authenticates and projects exact persisted scope", { c
   assert.deepEqual(await view.getClaimLevelEvidenceView(spec, pool), result);
   await assert.rejects(() => view.getClaimLevelEvidenceView({ ...spec, envelopeManifest: [{ envelopeId: id(999), canonicalVersion: 1, canonicalHash: h("a") }] , }, pool), (error) => error.code === "MISSING_AUTHORITY");
   await assert.rejects(() => view.getClaimLevelEvidenceView({ ...spec, claimVersionRef: { claimVersionId: id(998), canonicalVersion: 1, canonicalHash: h("a") } }, pool), (error) => error.code === "MISSING_AUTHORITY");
-  await assert.rejects(() => view.getClaimLevelEvidenceView({ ...spec, claimVersionRef: { claimVersionId: ids.version2Id, canonicalVersion: 1, canonicalHash: ids.version2.canonicalHash } }, pool), (error) => error.code === "CLAIM_SCOPE_MISMATCH");
+  await assert.rejects(() => view.getClaimLevelEvidenceView({ ...spec, claimVersionRef: { claimVersionId: ids.version2Id, canonicalVersion: 1, canonicalHash: ids.version2.canonicalHash } }, pool), (error) => error.code === "HASH_MISMATCH" && error.path === "envelope[0].claimEvidenceMatch.claimVersionCanonicalHash");
   await assert.rejects(() => view.getClaimLevelEvidenceView({ ...spec, envelopeManifest: [envelopeARef, { envelopeId: id(997), canonicalVersion: 1, canonicalHash: h("a") }] }, pool), (error) => error.code === "MISSING_AUTHORITY");
   const canonical = require("../dist/services/rcv022Canonical");
   const wrongMatchHash = h("f");
@@ -196,3 +219,92 @@ test("Wave B Golden Slice authenticates and projects exact persisted scope", { c
 });
 
 test.after(async () => { if (pool) await pool.end(); });
+
+
+// Instrumented fixture checks only; these do not connect to PostgreSQL.
+test("fixture transport retains primary rollback session-reset and release failures", async () => {
+  const primary = Object.assign(new Error("primary"), { failureDomain: "PRIMARY_FAILURE" });
+  const rollback = Object.assign(new Error("rollback"), { failureDomain: "ROLLBACK_FAILURE" });
+  const reset = Object.assign(new Error("reset"), { failureDomain: "CLEANUP_FAILURE" });
+  const release = Object.assign(new Error("release"), { failureDomain: "CLEANUP_FAILURE" });
+  const calls = [];
+  const source = { async connect() { return {
+    async query(sql) {
+      calls.push(sql);
+      if (sql === "ROLLBACK") throw rollback;
+      if (sql === "SET session_replication_role='origin'") throw reset;
+      return { rows: [] };
+    },
+    async release() { calls.push("RELEASE"); await Promise.resolve(); throw release; },
+  }; } };
+  await assert.rejects(() => withFixtureClient(async () => { throw primary; }, { transaction: true, resetReplicationRole: true, source }), error => {
+    assert.ok(error instanceof FailureTransportGroup);
+    const expected = [primary, rollback, reset, release];
+    const phases = ["primary", "rollback", "session-reset", "connection-release"];
+    assert.equal(error.failures.length, expected.length);
+    for (const [index, original] of expected.entries()) {
+      assert.strictEqual(error.failures[index].error, original);
+      assert.equal(error.failures[index].phase, phases[index]);
+    }
+    assert.equal(primary.failureDomain, "PRIMARY_FAILURE");
+    assert.equal(rollback.failureDomain, "ROLLBACK_FAILURE");
+    assert.equal(reset.failureDomain, "CLEANUP_FAILURE");
+    assert.equal(release.failureDomain, "CLEANUP_FAILURE");
+    assert.doesNotMatch(error.message, /RCV-021|RCV021/);
+    return true;
+  });
+  assert.deepEqual(calls, ["BEGIN", "ROLLBACK", "SET session_replication_role='origin'", "RELEASE"]);
+});
+
+test("fixture transport returns only after successful commit and release", async () => {
+  const calls = [];
+  const source = { async connect() { return {
+    async query(sql) { calls.push(sql); return { rows: [] }; },
+    async release() { await Promise.resolve(); calls.push("RELEASE"); },
+  }; } };
+  const value = {};
+  assert.strictEqual(await withFixtureClient(async () => value, { transaction: true, source }), value);
+  assert.deepEqual(calls, ["BEGIN", "COMMIT", "RELEASE"]);
+});
+
+
+test("fixture transport accepts a successful undefined result", async () => {
+  const calls = [];
+  const source = { async connect() { return {
+    async query(sql) { calls.push(sql); return { rows: [] }; },
+    release() { calls.push("RELEASE"); },
+  }; } };
+  const result = await withFixtureClient(async () => undefined, { transaction: true, source });
+  assert.strictEqual(result, undefined);
+  assert.deepEqual(calls, ["BEGIN", "COMMIT", "RELEASE"]);
+});
+
+test("fixture transport rejects isolated Session-Reset failure and still releases", async () => {
+  const reset = Object.assign(new Error("session reset"), { failureDomain: "CLEANUP_FAILURE" });
+  const calls = [];
+  const source = { async connect() { return {
+    async query(sql) { calls.push(sql); if (sql === "SET session_replication_role='origin'") throw reset; return { rows: [] }; },
+    release() { calls.push("RELEASE"); },
+  }; } };
+  await assert.rejects(() => withFixtureClient(async () => ({}), { resetReplicationRole: true, source }), error => {
+    assert.strictEqual(error, reset);
+    assert.equal(reset.failureDomain, "CLEANUP_FAILURE");
+    return true;
+  });
+  assert.deepEqual(calls, ["SET session_replication_role='origin'", "RELEASE"]);
+});
+
+test("fixture transport rejects isolated Release failure after COMMIT", async () => {
+  const release = Object.assign(new Error("release after COMMIT"), { failureDomain: "CLEANUP_FAILURE" });
+  const calls = [];
+  const source = { async connect() { return {
+    async query(sql) { calls.push(sql); return { rows: [] }; },
+    async release() { calls.push("RELEASE"); await Promise.resolve(); throw release; },
+  }; } };
+  await assert.rejects(() => withFixtureClient(async () => ({}), { transaction: true, source }), error => {
+    assert.strictEqual(error, release);
+    assert.equal(release.failureDomain, "CLEANUP_FAILURE");
+    return true;
+  });
+  assert.deepEqual(calls, ["BEGIN", "COMMIT", "RELEASE"]);
+});
