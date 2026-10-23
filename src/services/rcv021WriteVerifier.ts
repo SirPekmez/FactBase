@@ -1,9 +1,10 @@
+import { validateRcv021BigInt, validateRcv021NonNegativeBigInt } from "./rcv021Canonical";
 import {
   AttemptResolution, OperationLifecycleEvent, ProviderResult, ResearchAttempt, ResearchOperation, ResearchRun,
   ResultSelection, RunLifecycleEvent, RunTerminalResolution, SubjectBinding, TriggerBinding,
 } from "../contracts/rcv021ActiveResearchContractV1";
 import {
-  validateAttemptResolution, validateAttemptSet, validateOperationCreation, validateProviderResult,
+  authenticateRcv021CanonicalFields, validateAttemptResolution, validateAttemptSet, validateOperationCreation, validateProviderResult,
   validateResultSelection, validateRunCreation, validateRunTerminalResolution, validateSubjectBinding,
   validateTriggerBinding, deriveOperationLifecycle,
 } from "./rcv021SemanticCore";
@@ -49,4 +50,45 @@ export function verifyRcv021Write(input: Rcv021WriteBundle): Readonly<Rcv021Writ
   for (const resolution of attemptResolutions) { const attempt = attempts.find((item) => item.attemptId === resolution.attemptId); if (!attempt) throw new Error("MISSING_DATA: attempt resolution target"); validateAttemptResolution(attempt, resolution); }
   for (const run of runs) { const runAttempts = attempts.filter((attempt) => attempt.runId === run.runId); const resolutions = attemptResolutions.filter((resolution) => runAttempts.some((attempt) => attempt.attemptId === resolution.attemptId)); validateAttemptSet(runAttempts, resolutions); const terminal = terminals.find((item) => item.runId === run.runId); if (terminal) validateRunTerminalResolution(terminal, run, runAttempts, resolutions, results.filter((result) => result.runId === run.runId)); }
   return Object.freeze({ operations, subjects, triggers, operationLifecycleEvents: operationEvents, runs, runLifecycleEvents: runEvents, runTerminalResolutions: terminals, attempts, attemptResolutions, providerResults: results, resultSelections: selections });
+}
+
+/** Proposal authenticity only. Persisted-parent completeness is a separate locked gate. */
+export function verifyRcv021WriteProposal(input: Rcv021WriteBundle): Readonly<Rcv021WriteBundle> {
+  const entries = [
+    ["operations", "operationId"], ["subjects", "subjectBindingId"], ["triggers", "triggerBindingId"],
+    ["operationLifecycleEvents", "eventId"], ["runs", "runId"], ["runLifecycleEvents", "eventId"],
+    ["runTerminalResolutions", "resolutionId"], ["attempts", "attemptId"], ["attemptResolutions", "resolutionId"],
+    ["providerResults", "resultId"], ["resultSelections", "selectionId"],
+  ] as const;
+  const result: Record<string, readonly unknown[]> = {};
+  for (const [key, idKey] of entries) {
+    const values = input[key];
+    if (values !== undefined && !Array.isArray(values)) throw new Error("MALFORMED_DATA: proposal collection");
+    const copy = [...(values ?? [])].map(value => {
+      if (value === null || typeof value !== "object") throw new Error("MALFORMED_DATA: proposal record");
+      const descriptors = Object.getOwnPropertyDescriptors(value);
+      const snapshot: Record<string, unknown> = {};
+      for (const [name, descriptor] of Object.entries(descriptors)) {
+        if (!("value" in descriptor)) throw new Error("MALFORMED_DATA: accessor in proposal authority");
+        snapshot[name] = descriptor.value;
+      }
+      return Object.freeze(snapshot) as unknown as typeof value;
+    }); duplicateIds(copy, idKey);
+    for (const value of copy) {
+      if (key === "attempts") validateRcv021BigInt((value as ResearchAttempt).attemptNumber);
+      if (key === "runTerminalResolutions") validateRcv021NonNegativeBigInt((value as RunTerminalResolution).resultCount);
+      authenticateRcv021CanonicalFields(value, key);
+    }
+    result[key] = Object.freeze(copy);
+  }
+  for (const subject of (result.subjects ?? []) as readonly SubjectBinding[]) validateSubjectBinding(subject);
+  for (const trigger of (result.triggers ?? []) as readonly TriggerBinding[]) validateTriggerBinding(trigger);
+  for (const operation of (result.operations ?? []) as readonly ResearchOperation[]) {
+    const subject = (result.subjects as readonly SubjectBinding[]).find(value => value.operationId === operation.operationId);
+    const trigger = (result.triggers as readonly TriggerBinding[]).find(value => value.operationId === operation.operationId);
+    if (!subject || !trigger) throw new Error("MISSING_DATA: operation proposal bindings");
+    validateOperationCreation(operation, subject, trigger);
+  }
+  for (const selection of (result.resultSelections ?? []) as readonly ResultSelection[]) validateResultSelection(selection, [{ resultId: selection.providerResultId } as ProviderResult]);
+  return Object.freeze(result) as Readonly<Rcv021WriteBundle>;
 }

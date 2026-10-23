@@ -1,0 +1,117 @@
+{
+  "operation": {
+    "canonicalVersion": 1,
+    "canonical": "{\"operationCreatedAt\":\"2026-01-01T00:00:01.000000Z\",\"operationId\":\"71000000-0000-4000-8000-000000000001\",\"purpose\":\"research\",\"scopeCanonical\":\"{}\",\"subjectBindingId\":\"71000000-0000-4000-8000-000000000002\",\"triggerBindingId\":\"71000000-0000-4000-8000-000000000004\"}",
+    "canonicalHash": "2434d7929eeb36fd5a3dfc2e1bc2ecbd6cc87f15276b8cc54c198d106eed45fb",
+    "operationId": "71000000-0000-4000-8000-000000000001",
+    "subjectBindingId": "71000000-0000-4000-8000-000000000002",
+    "triggerBindingId": "71000000-0000-4000-8000-000000000004",
+    "purpose": "research",
+    "scopeCanonical": "{}",
+    "operationCreatedAt": "2026-01-01T00:00:01.000000Z"
+  },
+  "subject": {
+    "canonicalVersion": 1,
+    "canonical": "{\"captureId\":null,\"historicalClaimId\":null,\"observationOccurrenceId\":null,\"operationId\":\"71000000-0000-4000-8000-000000000001\",\"operatorRequestId\":\"71000000-0000-4000-8000-000000000003\",\"researchTriggerRequestId\":null,\"subjectBindingId\":\"71000000-0000-4000-8000-000000000002\",\"subjectType\":\"AUTHENTICATED_OPERATOR_REQUEST\"}",
+    "canonicalHash": "fd830335583f9f36bef384415a383c8e2e175f373b9a07edb1b0d1d597c2b4eb",
+    "subjectBindingId": "71000000-0000-4000-8000-000000000002",
+    "operationId": "71000000-0000-4000-8000-000000000001",
+    "subjectType": "AUTHENTICATED_OPERATOR_REQUEST",
+    "captureId": null,
+    "observationOccurrenceId": null,
+    "researchTriggerRequestId": null,
+    "operatorRequestId": "71000000-0000-4000-8000-000000000003",
+    "historicalClaimId": null
+  },
+  "trigger": {
+    "canonicalVersion": 1,
+    "canonical": "{\"authorizationCanonical\":\"{}\",\"creationTime\":\"2026-01-01T00:00:01.000000Z\",\"executionContext\":null,\"executionOwner\":\"owner\",\"initiatorIdentity\":\"operator\",\"operationId\":\"71000000-0000-4000-8000-000000000001\",\"originatingCaptureId\":null,\"originatingOccurrenceId\":null,\"ruleIdentity\":null,\"ruleVersion\":null,\"triggerBindingId\":\"71000000-0000-4000-8000-000000000004\",\"triggerRequestId\":null,\"triggerType\":\"OPERATOR\"}",
+    "canonicalHash": "84a9d55fad1daa57609f48f6a51980c4fcc96f3c13e18251cabb6f8ee9e28b41",
+    "triggerBindingId": "71000000-0000-4000-8000-000000000004",
+    "operationId": "71000000-0000-4000-8000-000000000001",
+    "triggerType": "OPERATOR",
+    "initiatorIdentity": "operator",
+    "authorizationCanonical": "{}",
+    "creationTime": "2026-01-01T00:00:01.000000Z",
+    "executionOwner": "owner",
+    "executionContext": null,
+    "triggerRequestId": null,
+    "originatingCaptureId": null,
+    "originatingOccurrenceId": null,
+    "ruleIdentity": null,
+    "ruleVersion": null
+  },
+  "operationLifecycleEvents": [],
+  "runs": [
+    {
+      "runId": "71000000-0000-4000-8000-000000000005",
+      "operationId": "71000000-0000-4000-8000-000000000001",
+      "strategyIdentity": "strategy",
+      "strategyVersion": 1,
+      "providerIdentity": "provider",
+      "adapterIdentity": "adapter",
+      "adapterVersion": "1",
+      "executionParametersCanonical": "{}",
+      "runCreatedAt": "2026-01-01T00:00:02.000000Z",
+      "deadlineAt": "2026-01-01T00:00:10.000000Z",
+      "predecessorRunId": null,
+      "canonicalVersion": 1,
+      "canonical": "{\"adapterIdentity\":\"adapter\",\"adapterVersion\":\"1\",\"deadlineAt\":\"2026-01-01T00:00:10.000000Z\",\"executionParametersCanonical\":\"{}\",\"operationId\":\"71000000-0000-4000-8000-000000000001\",\"predecessorRunId\":null,\"providerIdentity\":\"provider\",\"runCreatedAt\":\"2026-01-01T00:00:02.000000Z\",\"runId\":\"71000000-0000-4000-8000-000000000005\",\"strategyIdentity\":\"strategy\",\"strategyVersion\":1}",
+      "canonicalHash": "cded1295074cfdbac13aa78f0d2ad74ab41df34c94a9958788896ee92909edc6"
+    }
+  ],
+  "runLifecycleEvents": [
+    {
+      "eventId": "71000000-0000-4000-8000-000000000022",
+      "runId": "71000000-0000-4000-8000-000000000005",
+      "eventType": "STARTED",
+      "eventAt": "2026-01-01T00:00:02.000000Z",
+      "executionAuthority": "engine",
+      "canonicalVersion": 1,
+      "canonical": "{\"eventAt\":\"2026-01-01T00:00:02.000000Z\",\"eventId\":\"71000000-0000-4000-8000-000000000022\",\"eventType\":\"STARTED\",\"executionAuthority\":\"engine\",\"runId\":\"71000000-0000-4000-8000-000000000005\"}",
+      "canonicalHash": "bb03d4fff56dda5ab85ef34e0f6072ad7844fdfb2f5a9a6ab7658a5cd47f8918"
+    }
+  ],
+  "terminalResolutions": [
+    {
+      "resolutionId": "71000000-0000-4000-8000-000000000023",
+      "runId": "71000000-0000-4000-8000-000000000005",
+      "outcome": "TIMED_OUT",
+      "terminalAt": "2026-01-01T00:00:13.000000Z",
+      "completionAuthority": "engine",
+      "resultManifestCanonical": "[]",
+      "resultManifestHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "resultCount": "0",
+      "canonicalVersion": 1,
+      "canonical": "{\"completionAuthority\":\"engine\",\"outcome\":\"TIMED_OUT\",\"resolutionId\":\"71000000-0000-4000-8000-000000000023\",\"resultCount\":\"0\",\"resultManifestCanonical\":\"[]\",\"resultManifestHash\":\"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945\",\"runId\":\"71000000-0000-4000-8000-000000000005\",\"terminalAt\":\"2026-01-01T00:00:13.000000Z\"}",
+      "canonicalHash": "a3d90a254e7b265068feee99d0fb97ca301b5c3306d6c506172ffe841d38da6d"
+    }
+  ],
+  "attempts": [
+    {
+      "attemptId": "71000000-0000-4000-8000-000000000020",
+      "runId": "71000000-0000-4000-8000-000000000005",
+      "attemptNumber": "1",
+      "predecessorAttemptId": null,
+      "startedAt": "2026-01-01T00:00:03.000000Z",
+      "canonicalVersion": 1,
+      "canonical": "{\"attemptId\":\"71000000-0000-4000-8000-000000000020\",\"attemptNumber\":\"1\",\"predecessorAttemptId\":null,\"runId\":\"71000000-0000-4000-8000-000000000005\",\"startedAt\":\"2026-01-01T00:00:03.000000Z\"}",
+      "canonicalHash": "b16a881c83ee1aec61cd57f1fd4f3e60cfc299272a52a6c796a12bf98d259968"
+    }
+  ],
+  "attemptResolutions": [
+    {
+      "resolutionId": "71000000-0000-4000-8000-000000000021",
+      "attemptId": "71000000-0000-4000-8000-000000000020",
+      "outcome": "FAILED",
+      "terminalAt": "2026-01-01T00:00:12.000000Z",
+      "failureAuthority": "NOT_DEADLINE_RELATED",
+      "canonicalVersion": 1,
+      "canonical": "{\"attemptId\":\"71000000-0000-4000-8000-000000000020\",\"failureAuthority\":\"NOT_DEADLINE_RELATED\",\"outcome\":\"FAILED\",\"resolutionId\":\"71000000-0000-4000-8000-000000000021\",\"terminalAt\":\"2026-01-01T00:00:12.000000Z\"}",
+      "canonicalHash": "460f04e5017a538992f8057ce21e06373eeeaf82139676899d4aa6cae5a949a4"
+    }
+  ],
+  "providerResults": [],
+  "resultSelections": [],
+  "rcv020Occurrences": []
+}

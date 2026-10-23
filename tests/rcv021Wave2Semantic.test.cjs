@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const canonical = require("../dist/services/rcv021Canonical");
 const core = require("../dist/services/rcv021SemanticCore");
+const deadline = require("../dist/services/rcv021DeadlineProvenance");
 const contract = require("../dist/contracts/rcv021ActiveResearchContractV1");
 
 const id = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -101,9 +102,17 @@ test("attempt terminal model and valid retry lineage", () => {
   const first = attempt(20, 1, null, 3); const failed = resolution(20, "FAILED", 4, "technical");
   const retry = attempt(21, 2, id(20), 5); const succeeded = resolution(21, "SUCCEEDED", 6, null);
   core.validateAttemptSet([first, retry], [failed, succeeded], time(10));
+  const failedWithoutAuthorityValue = { resolutionId: id(120), attemptId: first.attemptId, outcome: "FAILED", terminalAt: time(4) };
+  assert.doesNotThrow(() => core.validateAttemptResolution(first, { ...failedWithoutAuthorityValue, ...fields(failedWithoutAuthorityValue) }));
   const badResolution = { ...failed, outcome: "TIMED_OUT" }; assert.throws(() => core.validateAttemptSet([first, retry], [{ ...badResolution, ...fields(badResolution) }, succeeded]), /RETRY_LINEAGE_VIOLATION|UNSUPPORTED_STATE/);
   assert.throws(() => core.validateRetry({ ...retry, attemptNumber: "3" }, first, failed), /RETRY_LINEAGE_VIOLATION/);
   assert.throws(() => core.validateRetry({ ...retry, startedAt: time(4) }, first, failed), /ORDERING_VIOLATION/);
+});
+
+test("attempt terminal time includes its start boundary", () => {
+  const sameTimeAttempt = attempt(23, 1, null, 3);
+  assert.doesNotThrow(() => core.validateAttemptResolution(sameTimeAttempt, resolution(23, "SUCCEEDED", 3, null)));
+  assert.throws(() => core.validateAttemptResolution(sameTimeAttempt, resolution(23, "SUCCEEDED", 2, null)), /ORDERING_VIOLATION/);
 });
 
 test("exact BigInt retry arithmetic beyond MAX_SAFE is preserved", () => {
@@ -124,13 +133,17 @@ test("PostgreSQL BIGINT maximum and retry overflow fail closed", () => {
 });
 
 test("deadline timeout resolves active attempts before terminal Run", () => {
-  const a = attempt(40, 1, null, 3); const r = resolution(40, "FAILED", 10, "RUN_DEADLINE_EXPIRED");
-  const timeoutRunValue = { ...run(), deadlineAt: time(10) }; const timeoutRun = { ...timeoutRunValue, ...fields(timeoutRunValue) };
+  const a = attempt(40, 1, null, 3);
+  const { canonicalVersion: _version, canonical: _canonical, canonicalHash: _hash, ...runPayload } = run();
+  const timeoutRunValue = { ...runPayload, deadlineAt: time(10) }; const timeoutRun = { ...timeoutRunValue, ...fields(timeoutRunValue) };
+  const r = resolution(40, "FAILED", 10, deadline.buildRcv021DeadlineProvenance(timeoutRun, a));
   core.validateAttemptSet([a], [r], time(12));
   const results = [];
   const manifest = core.deriveTerminalManifest(results);
   const terminalValue = { resolutionId: id(41), runId: id(10), outcome: "TIMED_OUT", terminalAt: time(12), completionAuthority: "engine", resultManifestCanonical: manifest.canonical, resultManifestHash: manifest.hash, resultCount: "0" };
   core.validateRunTerminalResolution({ ...terminalValue, ...fields(terminalValue) }, timeoutRun, [a], [r], results);
+  const missingDeadlineCause = resolution(40, "FAILED", 10, null);
+  assert.throws(() => core.validateRunTerminalResolution({ ...terminalValue, ...fields(terminalValue) }, timeoutRun, [a], [missingDeadlineCause], results), /DEADLINE_VIOLATION/);
   assert.throws(() => core.validateRunTerminalResolution({ ...terminalValue, terminalAt: time(40), ...fields({ ...terminalValue, terminalAt: time(40) }) }, run(), [a], [], results), /LIFECYCLE_VIOLATION/);
 });
 

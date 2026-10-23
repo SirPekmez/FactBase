@@ -1,3 +1,8 @@
+import { runRcv021OwnedTransaction } from "./rcv021OwnedTransaction";
+import { requireRcv021ReadCommitted } from "./rcv021TerminalWriteContext";
+import { loadRcv021HistoricalGraphWithinTransaction } from "./rcv021PostgresReadRepository";
+import { authenticateRcv021DecisionOutputCreation, requireRcv021HistoricalVerification } from "./rcv021ReadVerifier";
+import { graphAtCutoff } from "./researchSchedulerPostgresReader";
 import { createHash } from "node:crypto";
 import {
   canonicalizeRcv021Authority,
@@ -31,8 +36,8 @@ import {
 } from "./researchSchedulerTime";
 
 export interface SchedulerWriterClient {
-  query(text: string, values?: readonly unknown[]): Promise<{ rows?: readonly Record<string, any>[]; rowCount?: number | null }>;
-  release?: () => void;
+  query(text: string, values?: readonly unknown[]): Promise<{ rows?: readonly Record<string, any>[]; rowCount?: number | null; command?: string }>;
+  release: (destroy?: boolean) => void | Promise<void>;
 }
 
 export interface SchedulerWriterPool {
@@ -321,9 +326,8 @@ async function loadPrefix(client: SchedulerWriterClient, operationId: string, ev
 }
 
 export async function createSchedulerRunNow(pool: SchedulerWriterPool, request: SchedulerRunNowRequest, hooks?: SchedulerWriterTestHooks): Promise<SchedulerRunNowResult> {
-  const client = await pool.connect();
-  try {
-    await q(client, "BEGIN");
+  return runRcv021OwnedTransaction(pool, async client => {
+    await requireRcv021ReadCommitted(client);
     const stream = (await q(client, "SELECT policy_id::text AS policy_id, operation_id::text AS operation_id FROM public.scheduler_policy_streams WHERE policy_id=$1 FOR UPDATE", [request.policyId])).rows?.[0];
     if (!stream || stream.operation_id !== request.operationId) throw new Error("IDENTITY_MISMATCH: policy stream");
     await q(client, "SELECT operation_id FROM public.research_operations WHERE operation_id=$1 FOR UPDATE", [request.operationId]);
@@ -346,6 +350,7 @@ export async function createSchedulerRunNow(pool: SchedulerWriterPool, request: 
     const slotIndex = evaluation.slotIndex;
     const existing = decisions.find((row) => row.slotIndex === slotIndex);
     const runId = deriveSchedulerRunId({ operationId: request.operationId, policyId: request.policyId, slotIndex });
+    await verifySchedulerRcv021DeadlineContext(client, request.operationId, canonicalTime(request.evaluationAt), runId);
     const bindingIdentity = `scheduler-run-now:${request.operationId}:${request.policyId}:${slotIndex}`;
     const runValue = { runId, operationId: request.operationId, strategyIdentity: request.strategyIdentity, strategyVersion: request.strategyVersion, providerIdentity: request.providerIdentity, adapterIdentity: request.adapterIdentity, adapterVersion: request.adapterVersion, executionParametersCanonical: request.executionParametersCanonical, runCreatedAt: canonicalTime(request.evaluationAt), deadlineAt: canonicalTime(request.deadlineAt), predecessorRunId: null } as ResearchRun;
     const runEncoded = canonicalizeRcv021Authority(runValue);
@@ -361,7 +366,6 @@ export async function createSchedulerRunNow(pool: SchedulerWriterPool, request: 
       if (!existingBinding) throw new Error("MISSING_DATA: existing binding");
       const binding = canonicalizeSchedulerRunNowBinding({ operationId: request.operationId, policyId: request.policyId, slotIndex, runId });
       sameAuthority(existingBinding.canonical, existingBinding.canonical_hash, binding.canonical, binding.hash);
-      await q(client, "COMMIT");
       return { status: "IDEMPOTENT", operationId: request.operationId, policyId: request.policyId, slotIndex, runId, manifestId: existing.manifestId, decisionHash: existing.canonicalHash, bindingHash: binding.hash };
     }
     const prefix = await loadPrefix(client, request.operationId, canonicalTime(request.evaluationAt));
@@ -386,10 +390,17 @@ export async function createSchedulerRunNow(pool: SchedulerWriterPool, request: 
     failAt(hooks, "before-binding");
     await q(client, `INSERT INTO public.scheduler_run_now_bindings (operation_id,policy_id,slot_index,run_id,canonical_version,canonical,canonical_hash) VALUES ($1,$2,$3,$4,1,$5,$6)`, [request.operationId, request.policyId, slotIndex, runId, binding.canonical, Buffer.from(binding.hash, "hex")]);
     failAt(hooks, "after-binding");
-    await q(client, "COMMIT");
     return { status: "COMMITTED", operationId: request.operationId, policyId: request.policyId, slotIndex, runId, manifestId, decisionHash: decision.hash, bindingHash: binding.hash };
-  } catch (error) {
-    try { await q(client, "ROLLBACK"); } catch { /* preserve original failure */ }
-    throw error;
-  } finally { client.release?.(); }
+  });
+}
+
+/** Scheduler admission gate, evaluated before the lifecycle prefix is consumed. */
+export async function verifySchedulerRcv021DeadlineContext(client: SchedulerWriterClient, operationId: string, evaluationAt: string, excludeDecisionRunId?: string): Promise<void> {
+  const history = await loadRcv021HistoricalGraphWithinTransaction(client, operationId);
+  if (!history) throw new Error("MISSING_DATA: Operation history");
+  if (excludeDecisionRunId !== undefined) {
+    const ownRun = history.runs.find(run => run.runId === excludeDecisionRunId);
+    if (ownRun) authenticateRcv021DecisionOutputCreation(graphAtCutoff(history, evaluationAt), excludeDecisionRunId, evaluationAt);
+  }
+  requireRcv021HistoricalVerification(graphAtCutoff(history, evaluationAt, excludeDecisionRunId === undefined ? [] : [excludeDecisionRunId]), evaluationAt);
 }

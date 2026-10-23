@@ -32,3 +32,29 @@ test("Wave-4 verifier rejects corruption without repair", () => {
 test("terminal manifest is independently deterministic", () => {
   const input = graph(); const results = input.providerResults; const manifest = core.deriveTerminalManifest(results.slice().reverse()); assert.equal(manifest.count, "1"); assert.match(manifest.canonical, /resultId/); assert.equal(manifest.hash.length, 64);
 });
+
+
+test("ordinary FAILED history preserves omitted and explicit-null cause bytes", () => {
+  for (const includeNull of [false, true]) {
+    const input = graph();
+    const a = { attemptId: id(20), runId: input.runs[0].runId, attemptNumber: "1", predecessorAttemptId: null, startedAt: time(3) };
+    input.attempts = [{ ...a, ...fields(a) }];
+    const r = { resolutionId: id(21), attemptId: a.attemptId, outcome: "FAILED", terminalAt: time(4), ...(includeNull ? { failureAuthority: null } : {}) };
+    const authority = { ...r, ...fields(r) };
+    // Mirrors the nullable column returned by PostgreSQL SELECT.
+    input.attemptResolutions = [{ ...authority, failureAuthority: null }];
+    const before = JSON.stringify(input);
+    assert.equal(verifier.verifyRcv021HistoricalGraph(input).verified, true);
+    assert.equal(JSON.stringify(input), before);
+    const corrupt = structuredClone(input);
+    corrupt.attemptResolutions[0].failureAuthority = "injected cause";
+    assert.throws(() => verifier.verifyRcv021HistoricalGraph(corrupt), /CANONICAL_MISMATCH/);
+    const badHash = structuredClone(input);
+    badHash.attemptResolutions[0].canonicalHash = "0".repeat(64);
+    assert.throws(() => verifier.verifyRcv021HistoricalGraph(badHash), /HASH_MISMATCH/);
+    const missingCause = structuredClone(input);
+    const withCause = { ...r, failureAuthority: "technical cause" };
+    missingCause.attemptResolutions[0] = { ...withCause, ...fields(withCause), failureAuthority: null };
+    assert.throws(() => verifier.verifyRcv021HistoricalGraph(missingCause), /CANONICAL_MISMATCH/);
+  }
+});

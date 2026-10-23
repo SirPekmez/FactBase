@@ -311,7 +311,7 @@ CREATE TABLE public.research_attempt_resolutions (
     FOREIGN KEY (attempt_id) REFERENCES public.research_attempts (attempt_id)
     ON DELETE NO ACTION ON UPDATE NO ACTION,
   CONSTRAINT chk_rcv021_attempt_resolution_failure CHECK (
-    (outcome = 'FAILED' AND failure_authority IS NOT NULL AND char_length(failure_authority) > 0)
+    (outcome = 'FAILED' AND (failure_authority IS NULL OR char_length(failure_authority) > 0))
     OR (outcome = 'SUCCEEDED' AND failure_authority IS NULL)
   ),
   CONSTRAINT chk_rcv021_attempt_resolution_version CHECK (canonical_version = 1),

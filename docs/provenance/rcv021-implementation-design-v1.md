@@ -2,13 +2,16 @@
 
 ## 1. Design authority and status
 
-This Design implements the frozen RCV-021 Contract V1 only.
+This Design is drafted against the owner-selected working basis for the
+RCV-021 Contract V1 identified below. That selection is solely a basis for
+continued review; the Contract remains a draft and is not frozen. It does not
+approve or freeze the Contract or authorize implementation.
 
 Contract:
 `docs/provenance/rcv021-active-research-orchestration-contract-v1.md`
 
-Required Contract SHA256:
-`add7b8214de8c24d4b5c5e9a7ff231a5277f310335a54ba9540604429d20cf96`
+Selected working-basis Contract SHA256:
+`0275261ee20decf2f1194ad40b052bed77dafad5742e756cc75ed7a45baaed46`
 
 The Design adds no semantic authority. It specifies physical objects,
 validation, transaction boundaries, interfaces, and proof strategy. It is a
@@ -135,11 +138,11 @@ provider-descriptive non-empty text, not a new RCV-021 semantic enum.
 9. **`research_attempt_resolutions`** — PK `resolution_id`; required
    `attempt_id` (unique FK), closed technical outcome domain `SUCCEEDED` or
    `FAILED`, `terminal_at`, canonical version/bytes/hash, and `created_at`;
-   nullable `failure_authority` is required exactly for FAILED and forbidden
-   for SUCCEEDED. `failure_authority` is technical diagnostic provenance only
-   and records the immutable Run-deadline cause when applicable. Index
-   `(attempt_id, terminal_at)`; the verifier enforces terminal time after
-   start and one immutable resolution.
+   nullable `failure_authority` is optional for ordinary FAILED resolutions,
+   required for a FAILED resolution caused by Run-deadline expiry, and
+   forbidden for SUCCEEDED. When present, it is non-empty technical diagnostic
+   provenance only. Index `(attempt_id, terminal_at)`; the verifier enforces
+   `terminal_at >= started_at` and one immutable resolution.
 10. **`research_provider_results`** — PK `result_id`; required `run_id` FK,
     `provider_item_identity`, `provider_envelope_canonical`,
     `provider_identity`, `adapter_identity`, `adapter_version`,
@@ -317,8 +320,9 @@ PostgreSQL BIGINT maximum; Retry still requires predecessor number plus one.
 
 `research_attempt_resolutions` has exactly one immutable row per Attempt. It
 contains resolution identity, Attempt identity, terminal technical outcome
-(`SUCCEEDED` or `FAILED`), terminal time, failure authority/diagnostic where
-applicable, canonical version, canonical bytes, and hash.
+(`SUCCEEDED` or `FAILED`), terminal time, optional failure authority/diagnostic
+for ordinary `FAILED` outcomes, required deadline-expiry provenance for a
+deadline-caused `FAILED` outcome, canonical version, canonical bytes, and hash.
 
 A Retry must be in the same Run, reference a terminal `FAILED` predecessor,
 start strictly after the predecessor terminal time, and have number exactly
@@ -332,6 +336,18 @@ resolves `TIMED_OUT`; no Retry may begin after Run terminalization. The timing
 rules are `attemptStartedAt <= attemptTerminalAt <= runTerminalAt`, and a
 `TIMED_OUT` Run has `runTerminalAt >= deadline` after all active Attempts are
 resolved.
+
+### 10.1 Owner-selected deadline provenance working representation
+
+The owner selected a versioned structured deadline-cause representation in the
+existing optional `failure_authority` field. The exact working schema,
+legacy-evidence distinction and implementation scope are documented in
+`docs/provenance/rcv021-deadline-provenance-working-basis-v1.md`.
+Ordinary FAILED provenance remains optional. Historical canonical bytes and
+hashes are never rewritten. Canonical authentication of legacy text does not
+establish fully qualified deadline-cause evidence. This working representation
+and the source-level counterexamples are not physical requalification,
+a complete transaction-context proof, freeze or Snapshot-Lock.
 
 ## 11. Rerun
 
@@ -445,8 +461,9 @@ The persisted times are:
 - immutable Run deadline.
 
 Required ordering is operation creation before close or Run creation; Run
-creation before start; start before attempts; attempt start before attempt
-terminal; Retry start after failed predecessor terminal time; Rerun creation
+creation before start; start before attempts; attempt start no later than its
+attempt terminal (`attemptStartedAt <= attemptTerminalAt`); Retry start after
+failed predecessor terminal time; Rerun creation
 after terminal predecessor Run; result observation before selection; and
 selection before any requested RCV-020 observation execution. Provider/source
 time is metadata and may precede or follow observation time. RCV-020

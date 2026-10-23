@@ -1,3 +1,4 @@
+import { runRcv021OwnedTransaction } from "./rcv021OwnedTransaction";
 import type { Rcv021PgClient, Rcv021PgPool } from "./rcv021PostgresRepository";
 
 export interface Rcv021HistoricalGraph {
@@ -17,9 +18,15 @@ export interface Rcv021HistoricalGraph {
 
 const one = async (client: Rcv021PgClient, sql: string, values: readonly unknown[]): Promise<Record<string, unknown> | null> => {
   const result = await client.query(sql, values);
-  return (result.rows ?? []).length === 1 ? result.rows![0] : null;
+  if (!result || !Array.isArray(result.rows)) throw new Rcv021ReadRepositoryError("unmeasured historical row set");
+  if (result.rows.length > 1) throw new Rcv021ReadRepositoryError("ambiguous historical row set");
+  return result.rows.length === 1 ? result.rows[0] : null;
 };
-const many = async (client: Rcv021PgClient, sql: string, values: readonly unknown[]): Promise<readonly Record<string, unknown>[]> => (await client.query(sql, values)).rows ?? [];
+const many = async (client: Rcv021PgClient, sql: string, values: readonly unknown[]): Promise<readonly Record<string, unknown>[]> => {
+  const result = await client.query(sql, values);
+  if (!result || !Array.isArray(result.rows)) throw new Rcv021ReadRepositoryError("unmeasured historical row set");
+  return result.rows;
+};
 const id = (value: unknown): string => String(value);
 const hex = (value: unknown): string => typeof value === "string" ? value : Buffer.from(value as Uint8Array).toString("hex");
 const ts = (column: string): string => `to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
@@ -31,12 +38,14 @@ export class Rcv021PostgresReadRepository {
   constructor(private readonly pool: Rcv021PgPool) {}
 
   async loadByOperationId(operationId: string): Promise<Rcv021HistoricalGraph | null> {
-    const client = await this.pool.connect();
-    let began = false;
-    try {
-      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"); began = true;
+    return runRcv021OwnedTransaction(this.pool, client => loadRcv021HistoricalGraphWithinTransaction(client, operationId), "snapshot-read");
+  }
+}
+
+/** Same-client retrieval only: caller owns transaction, locks and cleanup. */
+export async function loadRcv021HistoricalGraphWithinTransaction(client: Rcv021PgClient, operationId: string): Promise<Rcv021HistoricalGraph | null> {
       const operation = await one(client, `SELECT operation_id::text AS "operationId", subject_binding_id::text AS "subjectBindingId", trigger_binding_id::text AS "triggerBindingId", purpose, scope_canonical AS "scopeCanonical", ${ts("operation_created_at")} AS "operationCreatedAt", canonical_version AS "canonicalVersion", canonical, encode(canonical_hash,'hex') AS "canonicalHash" FROM public.research_operations WHERE operation_id=$1`, [operationId]);
-      if (!operation) { await client.query("COMMIT"); began = false; return null; }
+      if (!operation) return null;
       const subject = await one(client, `SELECT subject_binding_id::text AS "subjectBindingId", operation_id::text AS "operationId", subject_type AS "subjectType", capture_id::text AS "captureId", observation_occurrence_id::text AS "observationOccurrenceId", research_trigger_request_id::text AS "researchTriggerRequestId", operator_request_id::text AS "operatorRequestId", historical_claim_id::text AS "historicalClaimId", canonical_version AS "canonicalVersion", canonical, encode(canonical_hash,'hex') AS "canonicalHash" FROM public.research_operation_subject_bindings WHERE operation_id=$1`, [operationId]);
       const trigger = await one(client, `SELECT trigger_binding_id::text AS "triggerBindingId", operation_id::text AS "operationId", trigger_type AS "triggerType", initiator_identity AS "initiatorIdentity", authorization_canonical AS "authorizationCanonical", execution_owner AS "executionOwner", trigger_request_id::text AS "triggerRequestId", originating_capture_id::text AS "originatingCaptureId", originating_occurrence_id::text AS "originatingOccurrenceId", rule_identity AS "ruleIdentity", rule_version AS "ruleVersion", canonical_version AS "canonicalVersion", canonical, encode(canonical_hash,'hex') AS "canonicalHash" FROM public.research_operation_trigger_bindings WHERE operation_id=$1`, [operationId]);
       if (!subject || !trigger) throw new Rcv021ReadRepositoryError("operation binding missing");
@@ -61,9 +70,5 @@ export class Rcv021PostgresReadRepository {
       const resultSelections = resultIds.length ? await many(client, `SELECT selection_id::text AS "selectionId", provider_result_id::text AS "providerResultId", selection_authorization AS "selectionAuthorization", selected_artifact_identity AS "selectedArtifactIdentity", observation_occurrence_id::text AS "observationOccurrenceId", ${ts("selected_at")} AS "selectedAt", canonical_version AS "canonicalVersion", canonical, encode(canonical_hash,'hex') AS "canonicalHash" FROM public.research_result_selections WHERE provider_result_id = ANY($1::uuid[]) ORDER BY selection_id::text`, [resultIds]) : [];
       const occurrenceIds = resultSelections.map((s) => s.observationOccurrenceId).filter(Boolean);
       const rcv020Occurrences = occurrenceIds.length ? await many(client, `SELECT occurrence_id::text AS "occurrenceId", logical_source_id::text AS "logicalSourceId", monitor_id::text AS "monitorId", monitor_configuration_version_id::text AS "monitorConfigurationVersionId", trigger_origin AS "triggerOrigin", trigger_canonical AS "triggerCanonical", trigger_hash AS "triggerHash", ${ts("trigger_received_at")} AS "triggerReceivedAt", ${ts("scheduled_at")} AS "scheduledAt", ${ts("requested_at")} AS "requestedAt", ${ts("due_at")} AS "dueAt", ${ts("evaluation_cutoff_at")} AS "evaluationCutoffAt", canonical, canonical_hash AS "canonicalHash" FROM public.rcv020_observation_occurrences WHERE occurrence_id = ANY($1::uuid[]) ORDER BY occurrence_id::text`, [occurrenceIds]) : [];
-      await client.query("COMMIT"); began = false;
       return { operation, subject, trigger, operationLifecycleEvents, runs, runLifecycleEvents, terminalResolutions, attempts, attemptResolutions, providerResults, resultSelections, rcv020Occurrences };
-    } catch (error) { if (began) await client.query("ROLLBACK"); throw error; }
-    finally { client.release?.(); }
-  }
 }

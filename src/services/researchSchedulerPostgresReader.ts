@@ -1,6 +1,7 @@
+import { Rcv021RetainedFailure, throwRcv021RetainedFailures } from "./rcv021WriteFailures";
 import { createHash } from "node:crypto";
 import { Rcv021PostgresReadRepository, Rcv021HistoricalGraph } from "./rcv021PostgresReadRepository";
-import { Rcv021ReadVerificationError, verifyRcv021HistoricalGraph } from "./rcv021ReadVerifier";
+import { Rcv021ReadVerificationError, authenticateRcv021DecisionOutputCreation, requireRcv021HistoricalVerification } from "./rcv021ReadVerifier";
 import {
   canonicalizeSchedulerDecision,
   canonicalizeSchedulerLifecyclePrefixManifest,
@@ -20,7 +21,7 @@ import { deriveSchedulerScheduledAt, formatSchedulerTimestamp, parseSchedulerTim
 
 export interface SchedulerReaderClient {
   query(text: string, values?: readonly unknown[]): Promise<{ rows?: readonly Record<string, any>[]; rowCount?: number | null }>;
-  release?: () => void;
+  release: (destroy?: boolean) => void | Promise<void>;
 }
 export interface SchedulerReaderPool { connect(): Promise<SchedulerReaderClient>; }
 
@@ -159,9 +160,9 @@ function graphRun(graph: Rcv021HistoricalGraph, runId: string): Record<string, u
   const run = graph.runs.find((candidate) => String(candidate.runId) === runId); if (!run) fail("MISSING_DATA", `run.${runId}`, "RCV-021 Run is missing"); return run!;
 }
 
-function graphAtCutoff(graph: Rcv021HistoricalGraph, evaluationAt: string): Rcv021HistoricalGraph {
+export function graphAtCutoff(graph: Rcv021HistoricalGraph, evaluationAt: string, excludeDecisionRunIds: readonly string[] = []): Rcv021HistoricalGraph {
   const cutoff = parseSchedulerTimestamp(evaluationAt);
-  const runs = graph.runs.filter((run) => parseSchedulerTimestamp(String(run.runCreatedAt)) <= cutoff);
+  const runs = graph.runs.filter((run) => !excludeDecisionRunIds.includes(String(run.runId)) && parseSchedulerTimestamp(String(run.runCreatedAt)) <= cutoff);
   const runIds = new Set(runs.map((run) => String(run.runId)));
   const runLifecycleEvents = graph.runLifecycleEvents.filter((event) => runIds.has(String(event.runId)) && parseSchedulerTimestamp(String(event.eventAt)) <= cutoff);
   const terminalResolutions = graph.terminalResolutions.filter((resolution) => runIds.has(String(resolution.runId)) && parseSchedulerTimestamp(String(resolution.terminalAt)) <= cutoff);
@@ -192,6 +193,20 @@ export interface VerifiedSchedulerHistory { readonly verified: true; readonly op
 /** SELECT-only historical Scheduler verifier. It reconstructs all authority from persisted rows and never invokes Scheduler Writer code. */
 export async function verifySchedulerHistory(pool: SchedulerReaderPool, operationId: string, policyId: string): Promise<VerifiedSchedulerHistory> {
   const streamClient = await pool.connect();
+  const failures: Rcv021RetainedFailure[] = [];
+  let result: VerifiedSchedulerHistory | undefined;
+  try { result = await verifySchedulerHistoryOnClient(pool, streamClient, operationId, policyId); }
+  catch (error) { failures.push({ phase: "primary", error }); }
+  try {
+    if (typeof streamClient.release !== "function") throw new Error("MALFORMED_DATA: Scheduler reader connection release missing");
+    await streamClient.release(failures.length !== 0);
+  } catch (error) { failures.push({ phase: "connection-release", error }); }
+  throwRcv021RetainedFailures(failures);
+  if (!result) throw new Error("MISSING_DATA: Scheduler history result missing");
+  return result;
+}
+
+async function verifySchedulerHistoryOnClient(pool: SchedulerReaderPool, streamClient: SchedulerReaderClient, operationId: string, policyId: string): Promise<VerifiedSchedulerHistory> {
   try {
     const stream = (await q(streamClient, "SELECT policy_id::text AS policy_id, operation_id::text AS operation_id FROM public.scheduler_policy_streams WHERE policy_id=$1", [policyId])).rows?.[0];
     if (!stream) fail("MISSING_DATA", "policyStream", "policy stream is missing");
@@ -204,15 +219,28 @@ export async function verifySchedulerHistory(pool: SchedulerReaderPool, operatio
     const rcvGraph = await new Rcv021PostgresReadRepository(pool as any).loadByOperationId(operationId);
     if (!rcvGraph) fail("MISSING_DATA", "rcv021", "Operation history is missing");
     const graph = rcvGraph!;
-    verifyRcv021HistoricalGraph(graphAtCutoff(graph, policies[0].effectiveAt));
+    const initialCutoff = policies[0].effectiveAt;
+    const initialOutputs = decisions.filter(row => row.decision === "RUN_NOW" && row.evaluationAt === initialCutoff);
+    const initialOutputIds: string[] = [];
+    for (const row of initialOutputs) {
+      const expected = deriveSchedulerRunId({ operationId, policyId, slotIndex: row.slotIndex });
+      if (row.runId !== expected) fail("RUN_NOW_BINDING_VIOLATION", "initialPrefix.run", "decision output identity mismatch");
+      authenticateRcv021DecisionOutputCreation(graphAtCutoff(graph, initialCutoff), expected, initialCutoff);
+      initialOutputIds.push(expected);
+    }
+    requireRcv021HistoricalVerification(graphAtCutoff(graph, initialCutoff, initialOutputIds), initialCutoff);
     const slots = decisions.map((row) => row.slotIndex);
     for (const row of decisions) {
       const slot = BigInt(row.slotIndex); const scheduled = parseSchedulerTimestamp(row.scheduledAt); const owner = selectSchedulerPolicyOwner(validated, scheduled);
       const expectedScheduled = deriveSchedulerScheduledAt(validated[0].firstEligibilityAtBigInt, slot, validated[0].fixedIntervalBigInt); if (scheduled !== expectedScheduled) fail("SLOT_ARITHMETIC_VIOLATION", `decisions.${row.slotIndex}.scheduledAt`, "scheduledAt arithmetic mismatch");
       if (row.policyVersion !== owner.versionBigInt.toString() || row.policyVersionHash !== owner.canonicalHash) fail("POLICY_VERSION_VIOLATION", `decisions.${row.slotIndex}.policyVersion`, "policy owner mismatch");
-      const historicalGraph = graphAtCutoff(graph, row.evaluationAt);
-      verifyRcv021HistoricalGraph(historicalGraph);
-      const excludeRun = row.decision === "RUN_NOW" ? row.runId : null; const prefix = prefixAt(graph, row.evaluationAt, excludeRun);
+      const excludeRun = row.decision === "RUN_NOW" ? row.runId : null;
+      // The decision-created Run is output, not predecision evidence; its exact
+      // binding and authority are authenticated separately below.
+      if (excludeRun !== null) authenticateRcv021DecisionOutputCreation(graphAtCutoff(graph, row.evaluationAt), excludeRun, row.evaluationAt);
+      const historicalGraph = graphAtCutoff(graph, row.evaluationAt, excludeRun === null ? [] : [excludeRun]);
+      requireRcv021HistoricalVerification(historicalGraph, row.evaluationAt);
+      const prefix = prefixAt(graph, row.evaluationAt, excludeRun);
       const expectedManifestId = uuidFromDigest("factbase/scheduler-manifest/v1\0", `${operationId}:${policyId}:${row.slotIndex}:${parseSchedulerTimestamp(row.evaluationAt).toString()}`);
       if (row.manifestId !== expectedManifestId) fail("IDENTITY_MISMATCH", `decisions.${row.slotIndex}.manifestId`, "manifest identity mismatch");
       const manifestRow = (await q(streamClient, `SELECT manifest_id::text AS manifest_id, operation_id::text AS operation_id, policy_id::text AS policy_id, slot_index::text AS slot_index, ${dbTime("evaluation_at")} AS evaluation_at, canonical_version::text AS canonical_version, canonical, encode(canonical_hash,'hex') AS hash FROM public.scheduler_lifecycle_prefix_manifests WHERE manifest_id=$1`, [row.manifestId])).rows?.[0];
@@ -253,9 +281,22 @@ export async function verifySchedulerHistory(pool: SchedulerReaderPool, operatio
     }
     return { verified: true, operationId, policyId, decisionCount: decisions.length, tailSlotIndex: chain.tail?.slotIndex ?? null };
   } catch (error) {
-    if (error instanceof SchedulerReaderVerificationError) throw error;
-    if (error instanceof Rcv021ReadVerificationError) fail("LIFECYCLE_PREFIX_VIOLATION", "rcv021", error.message);
-    if (error instanceof SchedulerCanonicalError || error instanceof SchedulerTimeError) fail("MALFORMED_DATA", error.path, error.message);
+    // Retain before instanceof or metadata access: hostile failure objects can throw here.
+    const retained: Rcv021RetainedFailure[] = [{ phase: "primary", error }];
+    let mapped: SchedulerReaderVerificationError | undefined;
+    try {
+      if (!(error instanceof SchedulerReaderVerificationError)) {
+        if (error instanceof Rcv021ReadVerificationError) mapped = new SchedulerReaderVerificationError("LIFECYCLE_PREFIX_VIOLATION", "rcv021", error.message);
+        else if (error instanceof SchedulerCanonicalError || error instanceof SchedulerTimeError) mapped = new SchedulerReaderVerificationError("MALFORMED_DATA", error.path, error.message);
+      }
+    } catch (inspection) {
+      retained.push({ phase: "primary", error: inspection });
+      throwRcv021RetainedFailures(retained);
+    }
+    if (mapped) {
+      Object.defineProperty(mapped, "cause", { value: error, enumerable: false });
+      throw mapped;
+    }
     throw error;
-  } finally { streamClient.release?.(); }
+  }
 }

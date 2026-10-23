@@ -139,3 +139,39 @@ test("close-vs-Run serialization rejects a Run after a committed close", { skip:
 });
 
 test.after(async () => { if (pool) await pool.end(); });
+
+
+const core = require("../dist/services/rcv021SemanticCore");
+function reviewHistory(seed,includeNull,terminalAt=4) {
+ const b=bundle(seed), base=seed*20;
+ const a={attemptId:id(base+6),runId:b.runs[0].runId,attemptNumber:'1',predecessorAttemptId:null,startedAt:time(3)};
+ const r={resolutionId:id(base+7),attemptId:a.attemptId,outcome:'FAILED',terminalAt:time(terminalAt),...(includeNull?{failureAuthority:null}:{})};
+ const start={eventId:id(base+8),runId:a.runId,eventType:'STARTED',eventAt:time(2),executionAuthority:'engine'};
+ const manifest=core.deriveTerminalManifest([]);
+ const t={resolutionId:id(base+9),runId:a.runId,outcome:'FAILED',terminalAt:time(5),completionAuthority:'engine',resultManifestCanonical:manifest.canonical,resultManifestHash:manifest.hash,resultCount:'0'};
+ return {...b,attempts:[{...a,...fields(a)}],attemptResolutions:[{...r,...fields(r)}],runLifecycleEvents:[{...start,...fields(start)}],runTerminalResolutions:[{...t,...fields(t)}]};
+}
+for(const [seed,includeNull,end] of [[101,false,4],[102,true,3]]) test(`write/read exact FAILED history: ${includeNull?'explicit null, equal start/end':'omitted cause'}`,{skip:!enabled},async()=>{
+ const input=reviewHistory(seed,includeNull,end);
+ await repo.persistRcv021Bundle(pool,input);
+ const row=(await pool.query('SELECT failure_authority,canonical,encode(canonical_hash,\'hex\') AS hash FROM research_attempt_resolutions WHERE resolution_id=$1',[input.attemptResolutions[0].resolutionId])).rows[0];
+ assert.equal(row.failure_authority,null);assert.equal(row.canonical,input.attemptResolutions[0].canonical);assert.equal(row.hash,input.attemptResolutions[0].canonicalHash);
+ const started=(await pool.query("SELECT to_char(event_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS at FROM research_run_lifecycle_events WHERE event_id=$1",[input.runLifecycleEvents[0].eventId])).rows[0];
+ assert.equal(started.at,input.runLifecycleEvents[0].eventAt);
+ const before=JSON.stringify(row);assert.equal((await read.Rcv021ReadService.fromPool(pool).verifyOperation(input.operations[0].operationId)).verified,true);
+ const after=(await pool.query('SELECT failure_authority,canonical,encode(canonical_hash,\'hex\') AS hash FROM research_attempt_resolutions WHERE resolution_id=$1',[input.attemptResolutions[0].resolutionId])).rows[0];assert.equal(JSON.stringify(after),before);
+});
+test('deadline missing cause and terminal-before-start reject before any persistence',{skip:!enabled},async()=>{
+ for(const [seed,deadline] of [[103,false],[104,true]]){
+  const b=reviewHistory(seed,false,deadline?40:2);
+  if(deadline){const t={...b.runTerminalResolutions[0],outcome:'TIMED_OUT',terminalAt:time(41)};delete t.canonical;delete t.canonicalHash;delete t.canonicalVersion;b.runTerminalResolutions=[{...t,...fields(t)}];}
+  await assert.rejects(()=>repo.persistRcv021Bundle(pool,b),deadline?/DEADLINE_VIOLATION/:/ORDERING_VIOLATION/);
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM research_operations WHERE operation_id=$1',[b.operations[0].operationId])).rows[0].n,0);
+ }
+});
+test('persisted cause corruption is rejected with no read repair',{skip:!enabled},async()=>{
+ const b=reviewHistory(105,false);await repo.persistRcv021Bundle(pool,b);
+ const client=await pool.connect();try{await client.query("SET session_replication_role='replica'");await client.query('UPDATE research_attempt_resolutions SET failure_authority=$1 WHERE resolution_id=$2',['injected cause',b.attemptResolutions[0].resolutionId]);}finally{await client.query("SET session_replication_role='origin'");client.release();}
+ const snapshot=async()=>JSON.stringify((await pool.query('SELECT * FROM research_attempt_resolutions WHERE resolution_id=$1',[b.attemptResolutions[0].resolutionId])).rows);
+ const before=await snapshot();await assert.rejects(()=>read.Rcv021ReadService.fromPool(pool).verifyOperation(b.operations[0].operationId),/CANONICAL_MISMATCH/);assert.equal(await snapshot(),before);
+});
