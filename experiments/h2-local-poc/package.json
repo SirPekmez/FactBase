@@ -1,0 +1,7 @@
+{
+  "name": "h2-local-poc",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node run.mjs" },
+  "dependencies": { "jose": "6.2.14" }
+}
